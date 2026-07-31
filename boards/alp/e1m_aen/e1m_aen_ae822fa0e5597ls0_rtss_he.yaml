@@ -1,0 +1,10 @@
+# Copyright (c) 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: e1m_aen/ae822fa0e5597ls0/rtss_he
+name: Alp Lab E1M-AEN801 (Alif Ensemble E8) RTSS-HE MCU
+type: mcu
+arch: arm
+vendor: alp
+toolchain:
+  - zephyr

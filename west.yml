@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+#
+# West manifest for the E1M-AEN dual-core (Cortex-M55 RTSS-HP + RTSS-HE) demo.
+#
+# This repo IS the manifest repository (west "T2: star topology" -- this repo
+# imports upstream zephyr, nothing imports this repo). It carries no
+# dependency on alp-sdk anywhere on any path: board + app code call only
+# upstream Zephyr APIs, and the one out-of-tree piece (modules/alif-mhuv2)
+# is a plain sys_read32/sys_write32 mailbox driver with no HAL beneath it.
+#
+# NO hal_alif and NO alifsemi fork is required. Verified against
+# $ZEPHYR_BASE/soc/alif/ensemble/ (SoC layer for e4/e6/e8
+# families, including ae402fa0e5597le0 and ae822fa0e5597ls0) and
+# $ZEPHYR_BASE/dts/arm/alif/ensemble/ -- both already
+# ship in upstream Zephyr v4.4.0, and neither soc/alif/ensemble/common/soc.c
+# nor soc/alif/ensemble/{e4,e8}/CMakeLists.txt reference any hal_alif or
+# alifsemi module. The reference board boards/alif/ensemble_e8_dk/board.cmake
+# drives flashing through the in-tree "jlink" runner only.
+#
+# Module list below was verified, not guessed, against the working
+# zephyrproject checkout at $WEST_TOPDIR (west.yml + a passing
+# hello_world build for ensemble_e8_dk/ae822fa0e5597ls0/rtss_hp):
+#   - cmsis, cmsis_6 : CMSIS-Core headers (core_cm55.h etc). Required because
+#     arch/arm/core/Kconfig's "config CPU_CORTEX_M" selects HAS_CMSIS_CORE,
+#     and it is modules/cmsis_6/Kconfig that selects HAS_CMSIS_CORE_M "if
+#     CPU_CORTEX_M" (the legacy modules/cmsis/Kconfig only selects the A/R
+#     variants -- irrelevant here, but both projects were present and pulled
+#     into the passing smoke build, so both are pinned for safety).
+#   - open-amp, libmetal : the OpenAMP stack backing
+#     CONFIG_IPC_SERVICE_BACKEND_RPMSG (rpmsg over the shared SRAM0 carve-out
+#     + the alif,mhuv2-mbox doorbell), used by both dualcore_hp and
+#     dualcore_he apps for HP<->HE messaging.
+# Nothing else upstream (no hal_ethos_u, no mcuboot, no mbedtls, no fatfs/
+# littlefs) is touched by this demo: it is UART-console + IPC only.
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.0
+      import:
+        name-allowlist:
+          - cmsis
+          - cmsis_6
+          - open-amp
+          - libmetal
+
+  self:
+    # This repository's own path inside the west workspace it creates.
+    path: e1m-aen-dualcore-demo

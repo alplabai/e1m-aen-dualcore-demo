@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+
+CONFIG_ARM_MPU=y
+CONFIG_HW_STACK_PROTECTION=y
+
+# Load-bearing for the MRAM split (see &mram/partitions in the board .dts): without
+# this, Zephyr links against the whole zephyr,flash node (the full 5632 KB mram) and
+# ignores zephyr,code-partition, so the two clusters' images would silently overlap
+# at 0x80000000 instead of landing in their own 3072 KB / 2432 KB slot0_partition.
+# CONFIG_USE_DT_CODE_PARTITION derives FLASH_LOAD_OFFSET/FLASH_LOAD_SIZE from
+# /chosen/zephyr,code-partition (Kconfig.zephyr) so the linked image is actually
+# bounded by its partition.
+CONFIG_USE_DT_CODE_PARTITION=y
+
+CONFIG_SERIAL=y
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=y
+CONFIG_UART_INTERRUPT_DRIVEN=y
+CONFIG_UART_NS16550=y

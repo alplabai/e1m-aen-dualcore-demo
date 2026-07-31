@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# Alif Ensemble MHUv2 inter-core mailbox driver. ADR-0017-ADJACENT: a novel
+# Alif MHUv2 doorbell IP with no upstream Zephyr driver, no fork driver, and
+# no vendor HAL library to consume -- see mbox_alif_mhuv2.c's file header for
+# the full tier rationale.
+#
+# NOTE: sourced via drivers/Kconfig -> Kconfig (module root), which is itself
+# osourced into the main Kconfig tree OUTSIDE the upstream `if MBOX` block
+# (drivers/mbox/Kconfig in ZEPHYR_BASE), so `depends on MBOX` is spelled out
+# here explicitly rather than relied upon from the enclosing menu.
+
+config MBOX_ALIF_MHUV2
+	bool "Alif Ensemble MHUv2 mailbox"
+	default y if DT_HAS_ALIF_MHUV2_MBOX_ENABLED
+	depends on MBOX
+	help
+	  Enable the ARM MHUv2 inter-core doorbell mailbox driver as integrated in
+	  the Alif Ensemble family (E1/E3/E5/E7/E8). Doorbell (signalling) mode
+	  only: no payload travels through the MHU; data rides the OpenAMP
+	  static-vrings in shared SRAM and the MHU only rings a per-bit doorbell.

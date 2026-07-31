@@ -1,0 +1,7 @@
+board:
+  name: e1m_aen
+  full_name: Alp Lab E1M-AEN SoM (dual Cortex-M55)
+  vendor: alp
+  socs:
+  - name: ae402fa0e5597le0
+  - name: ae822fa0e5597ls0

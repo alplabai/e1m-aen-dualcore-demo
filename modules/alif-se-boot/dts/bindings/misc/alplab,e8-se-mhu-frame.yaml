@@ -1,0 +1,58 @@
+# Copyright 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+#
+# vendor-ext; UNVERIFIED ON SILICON -- see modules/alif-se-boot/README.md.
+#
+# One ARM MHUv2 register frame (send OR receive) DEDICATED to Secure-Enclave
+# service traffic on the Alif E8 (Ensemble) SoC. No driver binds directly to
+# this compatible -- the sibling `alplab,e8-se-boot` client node (see
+# alplab,e8-se-boot.yaml) reaches this node's `reg` through a phandle
+# property and reads/writes it with plain sys_read32/sys_write32, the same
+# way modules/alif-mhuv2's mbox_alif_mhuv2.c does for the general-purpose
+# doorbell pair. A binding is still required here because devicetree tooling
+# requires one for any node that sets `compatible`.
+#
+# This is a SEPARATE, PHYSICALLY DIFFERENT pair of frames from the
+# general-purpose inter-core doorbell pair (compatible `alif,mhuv2-mbox`,
+# modules/alif-mhuv2) -- a deliberately DIFFERENT compatible string is used
+# here specifically so DT_INST_FOREACH_STATUS_OKAY() in that sibling
+# driver's CONFIG_MBOX_ALIF_MHUV2 build never matches these nodes and tries
+# to instantiate a second, unwanted MBOX device on top of them.
+#
+# reg/interrupts values (0x40040000 IRQ 37 rx, 0x40050000 IRQ 38 tx) are
+# transcribed verbatim from the Alif zephyr_alif fork's
+# dts/arm/alif/ensemble/common/e1.dtsi and are not altered or invented here.
+# Note this pair carries an `interrupts` property on BOTH the rx and the tx
+# frame (unlike the doorbell pair, where only the rx frame does) -- also
+# transcribed as given, not homogenized to match the doorbell pair's shape.
+
+description: |
+  One ARM MHUv2 frame (send or receive) dedicated to Alif Secure-Enclave
+  service traffic. Consumed only via phandle by the sibling
+  `alplab,e8-se-boot` node -- see that binding's `alplab,rx-mhu` /
+  `alplab,tx-mhu` properties.
+
+compatible: "alplab,e8-se-mhu-frame"
+
+include: [base.yaml]
+
+properties:
+  reg:
+    required: true
+    description: Base address and size (0x1000) of this MHUv2 frame.
+
+  interrupts:
+    description: |
+      Combined interrupt line for this frame, as transcribed from the
+      canonical hardware spec (37 for the rx frame, 38 for the tx frame).
+      Declared for documentation/DT-address-map completeness; this module's
+      client (src/alif_se_boot.c) polls the frame's registers directly and
+      does not connect either line to the NVIC.
+
+  alplab,direction:
+    type: string
+    required: true
+    enum:
+      - "tx"
+      - "rx"
+    description: Role of this frame within the SE-service pair.

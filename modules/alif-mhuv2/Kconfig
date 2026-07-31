@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# Out-of-tree Zephyr module root Kconfig for alif_mhuv2 (see zephyr/module.yml:
+# build.kconfig = "Kconfig"). `rsource` (relative to THIS file) keeps the tree
+# relocatable regardless of where ZEPHYR_EXTRA_MODULES points.
+
+rsource "drivers/Kconfig"

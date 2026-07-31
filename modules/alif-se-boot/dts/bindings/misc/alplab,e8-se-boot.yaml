@@ -1,0 +1,91 @@
+# Copyright 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+#
+# vendor-ext; UNVERIFIED ON SILICON -- see modules/alif-se-boot/README.md.
+#
+# Binding for the Alp Lab client of the Alif Secure Enclave's BOOT_CPU
+# service (service_id 501), as observed on the Alif E8 (Ensemble) SoC family.
+# This is a logical node (no `reg` of its own, like this repo's own `ipc0`
+# node) that ties together the two hardware resources the client needs:
+#
+#   - `alplab,rx-mhu` / `alplab,tx-mhu`: phandles to a DEDICATED pair of ARM
+#     MHUv2 frames (see the sibling alplab,e8-se-mhu-frame.yaml binding)
+#     used ONLY to talk to the SE -- NOT the general-purpose inter-core
+#     doorbell MHUv2 pair (`alif,mhuv2-mbox`, modules/alif-mhuv2). Plain
+#     phandle properties are used here, not a `mboxes` phandle-array,
+#     because the client (src/alif_se_boot.c) does not go through the Zephyr
+#     MBOX class API at all -- it needs to write/read a raw 32-bit payload
+#     directly against each frame's channel-0 registers, which the
+#     doorbell-only MBOX API deliberately does not support (its `send()`
+#     rejects any non-NULL message). See the module README for the (a) vs
+#     (b) design-decision writeup.
+#   - `memory-region`: phandle to a small globally-addressable, non-cacheable
+#     SRAM carve-out (see the board overlay's `sram_se_req` node) that holds
+#     the 20-byte request/response structure the SE reads and writes.
+#
+# A distinct compatible, `alplab,e8-se-boot`, is used deliberately -- this is
+# NOT a reuse of any Alif-authored binding string. This binding, the request
+# struct, and the transport were authored from a reading of the PROTOCOL
+# (documented in modules/alif-se-boot/README.md), not from Alif's se_services
+# source tree, which is not vendored here.
+
+description: |
+  Alp Lab client for the Alif E8 Secure Enclave's BOOT_CPU service. Ties the
+  dedicated SE-only MHUv2 send/receive frame pair together with the SRAM
+  carve-out used for the request/response structure, so the driver
+  (src/alif_se_boot.c, this module) can ask the SE to release a secondary
+  RTSS core (e.g. RTSS-HE) at a given entry address.
+
+  Example:
+
+    se_mhu_rx: mhu@40040000 {
+        compatible = "alplab,e8-se-mhu-frame";
+        reg = <0x40040000 0x1000>;
+        interrupts = <37 3>;
+        alplab,direction = "rx";
+        status = "okay";
+    };
+
+    se_mhu_tx: mhu@40050000 {
+        compatible = "alplab,e8-se-mhu-frame";
+        reg = <0x40050000 0x1000>;
+        interrupts = <38 3>;
+        alplab,direction = "tx";
+        status = "okay";
+    };
+
+    se_boot: se-boot {
+        compatible = "alplab,e8-se-boot";
+        alplab,rx-mhu = <&se_mhu_rx>;
+        alplab,tx-mhu = <&se_mhu_tx>;
+        memory-region = <&sram_se_req>;
+        status = "okay";
+    };
+
+compatible: "alplab,e8-se-boot"
+
+include: [base.yaml]
+
+properties:
+  alplab,rx-mhu:
+    type: phandle
+    required: true
+    description: Phandle to this pair's `alplab,e8-se-mhu-frame` rx node.
+
+  alplab,tx-mhu:
+    type: phandle
+    required: true
+    description: Phandle to this pair's `alplab,e8-se-mhu-frame` tx node.
+
+  memory-region:
+    type: phandle
+    required: true
+    description: |
+      Phandle to a `zephyr,memory-region` SRAM node the SE and this core both
+      see at the SAME address (i.e. already globally addressable -- no
+      local-to-global translation needed) and marked non-cacheable
+      (`zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>`) so the
+      driver does not need to flush/invalidate the D-cache around the
+      request/response structure it places there. Must be disjoint from any
+      other memory-region carve-out (e.g. the RPMsg `sram_ipc0` vring region)
+      and must not overlap either generic MPU region (FLASH_0 / SRAM_0).

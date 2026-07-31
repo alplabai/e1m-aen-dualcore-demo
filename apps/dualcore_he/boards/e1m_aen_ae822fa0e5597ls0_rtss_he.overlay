@@ -1,0 +1,61 @@
+/*
+ * Copyright 2026 Alp Lab AB
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * dualcore_he overlay for e1m_aen/ae822fa0e5597ls0/rtss_he.
+ *
+ * mhu_tx / mhu_rx: the Alif MHUv2 mailbox pair this cluster uses to signal
+ * the rtss_hp cluster. Each M55 core sees its own TX/RX frame at the SAME
+ * register addresses (0x400B0000 / 0x400A0000) -- that is why this overlay
+ * is byte-for-byte identical to the ae402fa0e5597le0 one and to the mhu
+ * nodes in dualcore_hp's overlays; only the ipc0 "role" property differs
+ * between REMOTE (here) and HOST (dualcore_hp).
+ *
+ * interrupts = <43 3> on mhu_rx: GIC IRQ 43 / priority 3 for this MHUv2 RX
+ * frame. Not re-derived here -- carried over verbatim from the canonical
+ * hardware spec this project was built against; see modules/alif-mhuv2 for
+ * the driver that consumes it.
+ */
+
+/ {
+	soc {
+		mhu_tx: mhu@400b0000 {
+			compatible = "alif,mhuv2-mbox";
+			reg = <0x400B0000 0x1000>;
+			alif,direction = "tx";
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+
+		mhu_rx: mhu@400a0000 {
+			compatible = "alif,mhuv2-mbox";
+			reg = <0x400A0000 0x1000>;
+			interrupts = <43 3>;
+			alif,direction = "rx";
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+	};
+
+	/*
+	 * role = "remote": this is the rtss_he (secondary) side of the RPMsg
+	 * link. The dualcore_hp overlays set role = "host" for the matching
+	 * ipc0 node on rtss_hp. memory-region points at the sram_ipc0
+	 * carve-out declared once in the board .dts (shared, non-cacheable
+	 * SRAM0) -- same physical region both cores' overlays reference.
+	 */
+	ipc0: ipc0 {
+		compatible = "zephyr,ipc-openamp-static-vrings";
+		memory-region = <&sram_ipc0>;
+		mboxes = <&mhu_tx 0>, <&mhu_rx 0>;
+		mbox-names = "tx", "rx";
+		role = "remote";
+		status = "okay";
+	};
+
+	chosen {
+		zephyr,ipc = &ipc0;
+		zephyr,ipc-shm = &sram_ipc0;
+	};
+};

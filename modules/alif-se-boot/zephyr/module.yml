@@ -1,0 +1,6 @@
+name: alif_se_boot
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

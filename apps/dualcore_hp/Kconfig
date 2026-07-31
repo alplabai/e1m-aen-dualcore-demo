@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# App-level Kconfig for dualcore_hp. Presence of this file makes CMake's
+# kconfig.cmake use IT as KCONFIG_ROOT instead of $ZEPHYR_BASE/Kconfig (see
+# cmake/modules/kconfig.cmake in the Zephyr tree), so the trailing
+# `source "Kconfig.zephyr"` below is mandatory -- without it this app would
+# lose every upstream Kconfig option (LOG, IPC_SERVICE, MBOX, ...) that
+# prj.conf already turns on.
+#
+# What this file adds: two options controlling which peer core
+# src/main.c's alif_se_boot_cpu() call asks the Secure Enclave to release,
+# and at what entry address -- see src/main.c's top-of-file comment and
+# docs/BENCH-DUALCORE.md for the bench-proven shape these defaults encode.
+# Previously both values were #define'd straight into src/main.c
+# (RTSS_HE_ENTRY_ADDR = 0x58000000, cpu_id = ALIF_SE_BOOT_CPU_M55_HE) --
+# wrong on both counts for the shape actually run on E1M-AEN801 silicon on
+# 2026-07-30 (RPMsg host releasing M55-HP, not M55-HE). Making both a
+# Kconfig option (rather than fixing the two literals in place) means the
+# NEXT bench shape that turns out different from this one is a
+# `west build ... -- -DCONFIG_DEMO_RELEASE_PEER_CPU_ID=...` away, not
+# another main.c edit.
+
+config DEMO_RELEASE_PEER_CPU_ID
+	int "SE-domain CPU id of the peer core alif_se_boot_cpu() releases"
+	default 2
+	help
+	  SE-domain CPU id for BOOT_CPU (service_id 501)'s send_cpu_id field,
+	  per modules/alif-se-boot/include/alif_se_boot.h's
+	  ALIF_SE_BOOT_CPU_* constants:
+
+	    0 = A32_0
+	    1 = A32_1
+	    2 = M55_HP (EXTSYS_0)   <- default: bench-proven, see below
+	    3 = M55_HE (EXTSYS_1)
+
+	  Default 2 (M55_HP) matches the bench-proven shape on E1M-AEN801
+	  silicon (2026-07-30): the SES-booted cluster runs this app's RPMsg
+	  HOST logic and calls alif_se_boot_cpu() to release the OTHER
+	  cluster, M55-HP -- see docs/BENCH-DUALCORE.md for the full
+	  procedure. That is the MIRROR of what this option's old hardcoded
+	  equivalent used: 3 (M55_HE), which asks the SE to release the WRONG
+	  cluster for the proven shape.
+
+config DEMO_RELEASE_PEER_ENTRY
+	hex "Entry address reported to the SE for the released peer core"
+	default 0x50000000
+	help
+	  ITCM global alias for the peer core selected by
+	  DEMO_RELEASE_PEER_CPU_ID, confirmed from alp-sdk's board DTs:
+
+	    M55_HP itcm global_base = 0x50000000  <- default (pairs with cpu id 2 above)
+	    M55_HE itcm global_base = 0x58000000
+	    M55_HP dtcm global_base = 0x50800000
+	    M55_HE dtcm global_base = 0x58800000
+
+	  On the bench-proven path (a debugger-placed image at the released
+	  core's LOCAL address 0 -- see docs/BENCH-DUALCORE.md) this value is
+	  EFFECTIVELY DECORATIVE: the released core comes up with
+	  VTOR == 0x00000000 and fetches its initial SP/PC from its own
+	  LOCAL 0x00000000, not from this address. It is still passed to
+	  alif_se_boot_cpu() because a future SES-ATOC-based release (a
+	  two-entry ATOC with the peer entry flagged ["load"]) WOULD use it
+	  as the loadAddress/entry point -- see src/main.c.
+
+source "Kconfig.zephyr"

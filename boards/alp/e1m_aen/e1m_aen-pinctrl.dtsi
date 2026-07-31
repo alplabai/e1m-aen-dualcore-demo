@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2026 Alp Lab AB
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * E1M-AEN carrier console pinmux.
+ *
+ * SOURCE OF TRUTH -- these are NOT inherited from Alif's Ensemble E8 DevKit.
+ * They are transcribed from the E1M-AEN module pinout table, which is shared by
+ * the whole E1M-AEN family (E1M-AEN301 / 401 / 501 / 601 / 701 / 801 are
+ * pin-to-pin compatible), so one pinctrl file serves every SoC variant this
+ * board tree supports:
+ *
+ *   E1M pad | E1M function | Alif peripheral | Alif pad
+ *   --------+--------------+-----------------+---------
+ *   F2      | UART0_TX     | UART5_TX_A      | P3_5
+ *   G2      | UART0_RX     | UART5_RX_A      | P3_4
+ *   AG4     | UART1_TX     | UART3_TX_A      | P1_3
+ *   AH4     | UART1_RX     | UART3_RX_A      | P1_2
+ *
+ * Only these two UARTs reach the E1M edge connector. The Alif E8 DevKit's
+ * console choices (uart4 on P12_1/P12_2, uart2 on P1_0/P1_1) are NOT routed on
+ * an E1M carrier -- selecting them yields a silent console.
+ *
+ * Core-to-connector assignment (see each board .dts chosen zephyr,console):
+ *   rtss_hp -> uart5 == E1M UART0 (pads F2 / G2)
+ *   rtss_he -> uart3 == E1M UART1 (pads AG4 / AH4)
+ * That split is an SDK-side convention, not a hardware constraint; either core
+ * can drive either connector. Swap both the chosen node and the &uartN block in
+ * the board .dts if the test carrier wires them the other way round.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/alif-ensemble-pinctrl.h>
+
+&pinctrl {
+	/* rtss_hp console -- E1M UART0, pads F2 (TX) / G2 (RX). */
+	pinctrl_uart5: pinctrl_uart5 {
+		group0 {
+			pinmux = <PIN_P3_4__UART5_RX_A>;
+			input-enable;
+		};
+
+		group1 {
+			pinmux = <PIN_P3_5__UART5_TX_A>;
+		};
+	};
+
+	/* rtss_he console -- E1M UART1, pads AG4 (TX) / AH4 (RX). */
+	pinctrl_uart3: pinctrl_uart3 {
+		group0 {
+			pinmux = <PIN_P1_2__UART3_RX_A>;
+			input-enable;
+		};
+
+		group1 {
+			pinmux = <PIN_P1_3__UART3_TX_A>;
+		};
+	};
+};

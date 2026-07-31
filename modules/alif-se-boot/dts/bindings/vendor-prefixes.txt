@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright 2026 Alp Lab AB
+# SPDX-License-Identifier: Apache-2.0
+#
+# Module-local devicetree vendor-prefix registry for modules/alif-se-boot
+# (see zephyr/module.yml: build.settings.dts_root = "."). Every DT binding
+# under this module's dts/bindings/ uses the "alplab" compatible prefix
+# (`alplab,e8-se-boot`, `alplab,e8-se-mhu-frame`) for the Alp Lab-authored
+# nodes described in modules/alif-se-boot/README.md's "Authored from the
+# protocol, not from Alif's source" section -- that prefix is not registered
+# in upstream Zephyr's own dts/bindings/vendor-prefixes.txt, so every HP
+# configure otherwise emits "has unknown vendor prefix 'alplab'" for
+# se_mhu_rx / se_mhu_tx / se_boot. Format matches upstream's file: one
+# <TAB>-separated "<prefix><TAB><full vendor name>" line per entry; anything
+# starting with '#' is a comment.
+
+alplab	Alp Lab AB
