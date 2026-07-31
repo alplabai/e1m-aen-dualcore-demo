@@ -29,8 +29,8 @@
 #     into the passing smoke build, so both are pinned for safety).
 #   - open-amp, libmetal : the OpenAMP stack backing
 #     CONFIG_IPC_SERVICE_BACKEND_RPMSG (rpmsg over the shared SRAM0 carve-out
-#     + the alif,mhuv2-mbox doorbell), used by both dualcore_hp and
-#     dualcore_he apps for HP<->HE messaging.
+#     + the alif,mhuv2-mbox doorbell), used by both dualcore_host and
+#     dualcore_remote apps for host<->remote messaging.
 # Nothing else upstream (no hal_ethos_u, no mcuboot, no mbedtls, no fatfs/
 # littlefs) is touched by this demo: it is UART-console + IPC only.
 

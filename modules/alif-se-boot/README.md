@@ -2,8 +2,10 @@
 
 A standalone Zephyr module providing a client for the Alif Secure Enclave's
 BOOT_CPU service (`service_id` 501), used on Alif E8 (Ensemble) silicon to
-release a secondary RTSS core -- concretely, RTSS-HP releasing RTSS-HE on the
-Alp Lab E1M-AEN dual-core demo (`apps/dualcore_hp`).
+release a secondary RTSS core -- concretely, the Alp Lab E1M-AEN dual-core
+demo's HOST app (`apps/dualcore_host`) releasing its REMOTE peer
+(`apps/dualcore_remote`). On the E1M-AEN801 bench unit that is RTSS-HE
+releasing RTSS-HP -- see `docs/BENCH-DUALCORE.md` section 0.
 
 This module has **no dependency on alp-sdk** and does not vendor or link the
 Alif `se_services` HAL library -- see "Authored from the protocol" below.
@@ -54,49 +56,92 @@ register spec (DDI 0515) rather than any vendor driver.
 | Client source | `src/alif_se_boot.c` |
 | DT bindings | `dts/bindings/misc/alplab,e8-se-boot.yaml`, `dts/bindings/misc/alplab,e8-se-mhu-frame.yaml` |
 
-Public API is four functions:
+Public API is seven functions:
 
 ```c
+int alif_se_process_toc_entry(const char *image_id);
 int alif_se_boot_cpu(uint32_t cpu_id, uint32_t entry_addr);
 int alif_se_set_vtor(uint32_t cpu_id, uint32_t vtor_addr);
+int alif_se_reset_cpu(uint32_t cpu_id);
+int alif_se_release_cpu(uint32_t cpu_id);
 int alif_se_ping(void);
 int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr);
 ```
 
-- `alif_se_boot_cpu()` -- SE service_id 501 (BOOT_CPU) only.
-- `alif_se_set_vtor()` -- SE service_id 505 (SET_VTOR). INFERENCE, not a
-  confirmed wire struct: no dedicated `set_vtor_svc_t` was found in the
-  transcribed protocol. The vendor's declared wrapper,
-  `SERVICES_boot_set_vtor(services_handle, cpu_id, address, error_code)`, has
-  the identical `(handle, cpu_id, address, error_code)` shape as
-  `SERVICES_boot_cpu()`, so this client reuses BOOT_CPU's 20-byte request/
-  response wire struct, varying only `header.service_id`. `vtor_addr` is a
-  Cortex-M vector table BASE address, not a jump target: on release, the core
-  fetches its initial SP from `[vtor_addr]` and its initial PC from
-  `[vtor_addr + 4]`.
+- `alif_se_process_toc_entry()` -- SE service_id 500 (PROCESS_TOC_ENTRY).
+  Takes an ATOC entry NAME (`image_id`, e.g. `"ALP-HP"`), not a cpu_id -- a
+  DIFFERENT 20-byte wire struct from `alif_se_boot_cpu()`'s
+  (`process_toc_entry_svc_t` per the DFP: header + 8-byte `send_entry_id` +
+  `resp_error_code`, no cpu_id/address fields at all). Per the DFP, the named
+  entry must already be in a **DEFERRED** state (not auto-processed by SES at
+  cold boot); this call un-defers it, and SES then does whatever that entry's
+  own flags call for (load/verify/boot) AT CALL TIME instead of at cold boot.
+  This is the SES-driven alternative to this repo's proven `alif_se_boot_cpu()`
+  path against a plain `["load"]`-flagged entry (which the SES table reports
+  `uLV` -- Loaded+Verified, not Booted). The DFP source
+  (`se_services/templates/services_test.c`) confirms the on-wire flag bit
+  (`TOC_IMAGE_DEFERRED = 0x100`) and its SES table letter (`D`, at legend
+  position `FLAG_STRING_DEFERRED`) -- **what remains TBD is the ATOC-BUILDER
+  JSON field that sets that bit**: every sample ATOC config under
+  `alif-setools/app-release-exec-linux/build/config` (every `.json` file
+  there) uses only
+  `load`/`boot`/`compressed`/`encrypt`, never `deferred`, and `app-gen-toc`
+  itself is a PyInstaller binary whose flag vocabulary was not extractable
+  from what was in reach (`strings -a` found no "defer" substring in it at
+  all). See `alif_se_process_toc_entry()`'s doc comment in
+  `include/alif_se_boot.h` for the full account -- do not guess this field
+  name against real hardware.
+- `alif_se_boot_cpu()` -- SE service_id 501 (BOOT_CPU) only. Does **not**
+  transfer any vector table base into the target core's own VTOR register --
+  see `alif_se_start_cpu()` below for the sequence that does.
+- `alif_se_set_vtor()` -- SE service_id 505 (SET_VTOR). CONFIRMED wire
+  struct, per Alif's DFP se_services headers: SET_VTOR genuinely reuses
+  BOOT_CPU's 20-byte request/response wire struct, varying only
+  `header.service_id` (an earlier revision of this module could only infer
+  that reuse from the vendor's declared wrapper signature,
+  `SERVICES_boot_set_vtor(services_handle, cpu_id, address, error_code)`;
+  the DFP's own struct definitions confirm it directly now). `vtor_addr` is
+  a Cortex-M vector table BASE address, not a jump target: on release, the
+  core fetches its initial SP from `[vtor_addr]` and its initial PC from
+  `[vtor_addr + 4]`. SET_VTOR only ever writes a GLOBAL SE-side VTOR
+  register -- `alif_se_reset_cpu()` below is what transfers it into the
+  core's own internal VTOR.
+- `alif_se_reset_cpu()` -- SE service_id 503 (RESET_CPU). Uses a DIFFERENT,
+  16-byte wire struct (`control_cpu_svc_t` per the DFP: header plus
+  `send_cpu_id` plus `resp_error_code`, no address field). Per Alif's own
+  documented behaviour of `SERVICES_boot_reset_cpu()`: for an M55 core, this
+  also transfers whatever value a prior `alif_se_set_vtor()` call wrote into
+  the SE's Global VTOR register into that core's own internal VTOR register
+  -- the step a `alif_se_boot_cpu()`-only release skips.
+- `alif_se_release_cpu()` -- SE service_id 502 (RELEASE_CPU). Same 16-byte
+  wire struct as `alif_se_reset_cpu()`. This is the step that actually
+  starts the core running.
 - `alif_se_ping()` -- the readiness heartbeat (service_id 0) alone, with no
-  BOOT_CPU/SET_VTOR request built or sent. Added so a bench operator can
-  probe "is the SE awake" without the side effect of releasing or
-  reconfiguring a core -- `alif_se_boot_cpu()` used to couple heartbeat and
-  BOOT_CPU inseparably, which once cost a bench run an unintended HP release
-  during what was meant to be a pure reachability probe.
-- `alif_se_start_cpu()` -- convenience wrapper: `alif_se_set_vtor()` then
-  `alif_se_boot_cpu()`, in that order, stopping at (and returning) the first
-  failure. **HYPOTHESIS, NOT CONFIRMED ON SILICON.** This ordering is derived
-  from the SE service enum (`SERVICE_BOOT_SET_VTOR` sits at 505, between
-  `SERVICE_BOOT_CPU` (501) and `SERVICE_BOOT_SET_ARGS` (506)) and from a
-  bench failure in which a released core came up with
-  `VTOR == 0x00000000`, fetched its initial SP/PC from its own local address
-  0 (uninitialized garbage), and locked up
-  (`CFSR == 0x00000001` IACCVIOL, `HFSR == 0x40000000` FORCED) -- i.e.
-  `alif_se_boot_cpu()`'s `send_address` did NOT become the released core's
-  vector table base on that attempt. `alif_se_start_cpu()`'s own ordering has
-  NOT itself been exercised on hardware. `SERVICE_BOOT_RELEASE_CPU` (502) is
-  an UNTRIED alternative to the BOOT_CPU step that this function does not
-  use.
+  other request built or sent. Added so a bench operator can probe "is the
+  SE awake" without the side effect of releasing or reconfiguring a core --
+  `alif_se_boot_cpu()` used to couple heartbeat and BOOT_CPU inseparably,
+  which once cost a bench run an unintended HP release during what was meant
+  to be a pure reachability probe.
+- `alif_se_start_cpu()` -- the correct sequence to start a core at a
+  specific vector table base: `alif_se_set_vtor()`, then
+  `alif_se_reset_cpu()`, then `alif_se_release_cpu()`, in that order,
+  stopping at (and returning) the first failure. This ordering is not a
+  guess: it is how Alif's DFP documents these three services' side effects
+  (`services_host_boot.c`'s notes on `SERVICES_boot_set_vtor()` and
+  `SERVICES_boot_reset_cpu()`). An earlier revision of this function instead
+  called `alif_se_set_vtor()` then `alif_se_boot_cpu()`, on a **HYPOTHESIS**
+  derived only from the SE service enum's ordering -- that guess is what a
+  bench run caught: a released core came up with `VTOR == 0x00000000`,
+  fetched its initial SP/PC from its own local address 0 (uninitialized
+  garbage), and locked up (`CFSR == 0x00000001` IACCVIOL,
+  `HFSR == 0x40000000` FORCED), because BOOT_CPU never transfers the global
+  VTOR SET_VTOR staged -- only RESET_CPU does that. **UNVERIFIED ON SILICON
+  in this exact three-call form** -- it rests on Alif's own documented
+  service behaviour rather than the earlier enum-ordering guess, but this
+  specific sequence has not itself been exercised on E1M-AEN801 hardware.
 
 Return-code contract (documented in full in `include/alif_se_boot.h`, shared
-by all four functions):
+by every function that talks to the SE):
 
 - `0` -- SE reports BOOT_CPU succeeded.
 - `< 0` (a negative `errno`) -- a LOCAL MHU transport failure on THIS core's
@@ -110,18 +155,20 @@ by all four functions):
   would otherwise overflow a positive `int` -- so it can never collide with
   the negative-`errno` LOCAL-failure class above.
 
-**Every call sends a readiness heartbeat first.** Before touching BOOT_CPU or
-SET_VTOR at all, `alif_se_boot_cpu()` and `alif_se_set_vtor()` each send
-`service_id 0` (`SERVICE_MAINTENANCE_HEARTBEAT_ID` ==
+**Every call sends a readiness heartbeat first.** Before touching
+PROCESS_TOC_ENTRY, BOOT_CPU, SET_VTOR, RESET_CPU, or RELEASE_CPU at all,
+`alif_se_process_toc_entry()`, `alif_se_boot_cpu()`, `alif_se_set_vtor()`,
+`alif_se_reset_cpu()`, and `alif_se_release_cpu()` each
+send `service_id 0` (`SERVICE_MAINTENANCE_HEARTBEAT_ID` ==
 `SERVICE_MAINTENANCE_START`) and require a reply, retried up to 100 times --
 mirroring the vendor's own gate ("ensures the Secure Enclave is awake and
 synchronized, ready to process service requests"), which this client
-previously skipped. If the SE never answers the heartbeat at all, either
-function returns `-ENOTCONN` *without ever sending its BOOT_CPU/SET_VTOR
+previously skipped. If the SE never answers the heartbeat at all, the
+function returns `-ENOTCONN` *without ever sending its own boot-domain
 request* -- deliberately distinct from `-ETIMEDOUT`/`-EBUSY` so a bench
 operator can tell "the SE never woke" apart from "the SE woke but
-refused/timed out on the boot request itself". `alif_se_ping()` exposes this
-exact same heartbeat path standalone, with no BOOT_CPU/SET_VTOR request ever
+refused/timed out on the request itself". `alif_se_ping()` exposes this
+exact same heartbeat path standalone, with no boot-domain request ever
 built, for probing SE reachability alone.
 
 **Known permanent-`-EBUSY` gap:** after a send-ack timeout specifically
@@ -138,8 +185,8 @@ request buffer, both MHU frames, and the transport itself are global,
 core-local state, serialized with a `k_mutex` (`se_boot_lock`) so concurrent
 callers on THIS core queue safely rather than corrupting each other's
 in-flight request. This says nothing about the OTHER core touching the same
-hardware concurrently -- only one core (RTSS-HP in this repo) ever calls
-this module.
+hardware concurrently -- only the HOST app (`apps/dualcore_host`, on
+whichever cluster it is built for) ever calls this module.
 
 ## Design decision: (b), a dedicated transport, not an extension of `alif_mhuv2`
 
@@ -241,7 +288,7 @@ west build -b <board_target> <app_dir> \
 ```
 
 Both modules are independent and can be listed in either order; this repo's
-`scripts/build-all.sh` and `apps/dualcore_hp` already wire both in.
+`scripts/build-all.sh` and `apps/dualcore_host` already wire both in.
 
 ## Directory layout
 
@@ -261,7 +308,8 @@ modules/alif-se-boot/
 
 ## Attaching the DT node (app overlay, not the shared board `.dts`)
 
-Only `apps/dualcore_hp` releases RTSS-HE, so both the `sram_se_req`
-carve-out and the `se_boot` node live in `apps/dualcore_hp/boards/*.overlay`
--- never in the shared `boards/alp/e1m_aen/*.dts`, and never in
-`apps/dualcore_he`.
+Only `apps/dualcore_host` releases its peer, so both the `sram_se_req`
+carve-out and the `se_boot` node live in every
+`apps/dualcore_host/boards/*.overlay` (both qualifiers -- see that app's
+README for why it builds for both) -- never in the shared
+`boards/alp/e1m_aen/*.dts`, and never in `apps/dualcore_remote`.

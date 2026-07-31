@@ -1,0 +1,22 @@
+/*
+ * SPDX-FileCopyrightText: Copyright 2026 Alp Lab AB
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Retarget this app from MRAM-XIP to ITCM, so a debugger can place the
+ * image directly at the core's local 0x00000000 without going through the
+ * MRAM/ATOC path. Used by docs/BENCH-DUALCORE.md's Flow C procedure:
+ *
+ *     west build ... -DDTC_OVERLAY_FILE=itcm.overlay
+ *
+ * Use the path-ref `&itcm` form, NOT the phandle-array `<&itcm>` form. The
+ * phandle-array form parses, but yields FLASH_SIZE=0 in the generated
+ * devicetree, which then overflows the linker script -- the image has
+ * nowhere to link. This form is the one that actually builds.
+ */
+
+/ {
+	chosen {
+		zephyr,flash = &itcm;
+		/delete-property/ zephyr,code-partition;
+	};
+};

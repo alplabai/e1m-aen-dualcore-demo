@@ -9,8 +9,10 @@ config ALIF_SE_BOOT
 	default y if DT_HAS_ALPLAB_E8_SE_BOOT_ENABLED
 	help
 	  Client for the Alif Secure Enclave's BOOT_CPU service (service_id 501),
-	  used to release/boot a secondary RTSS core (e.g. RTSS-HE) from the core
-	  that already has SE access (RTSS-HP). Talks to the SE directly over a
+	  used to release/boot a secondary RTSS core (e.g. RTSS-HP) from the core
+	  that already has SE access (e.g. RTSS-HE -- see
+	  docs/BENCH-DUALCORE.md section 0 for which cluster that is on a given
+	  bench unit; it is NOT always RTSS-HP). Talks to the SE directly over a
 	  DEDICATED pair of ARM MHUv2 frames (mhu@40040000 rx / mhu@40050000 tx --
 	  distinct from any inter-core doorbell MHU pair such as the alif_mhuv2
 	  module's mhu@400a0000/mhu@400b0000) and carries the request/response in

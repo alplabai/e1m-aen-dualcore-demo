@@ -1,0 +1,217 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# App-level Kconfig for dualcore_host. Presence of this file makes CMake's
+# kconfig.cmake use IT as KCONFIG_ROOT instead of $ZEPHYR_BASE/Kconfig (see
+# cmake/modules/kconfig.cmake in the Zephyr tree), so the trailing
+# `source "Kconfig.zephyr"` below is mandatory -- without it this app would
+# lose every upstream Kconfig option (LOG, IPC_SERVICE, MBOX, ...) that
+# prj.conf already turns on.
+#
+# What this file adds: two options controlling which peer core
+# src/main.c's alif_se_boot_cpu() call asks the Secure Enclave to release,
+# and at what entry address -- see src/main.c's top-of-file comment and
+# docs/BENCH-DUALCORE.md for the bench-proven shape these defaults encode.
+# Previously both values were #define'd straight into src/main.c
+# (RTSS_HE_ENTRY_ADDR = 0x58000000, cpu_id = ALIF_SE_BOOT_CPU_M55_HE) --
+# wrong on both counts for the shape actually run on E1M-AEN801 silicon on
+# 2026-07-30 (RPMsg host releasing M55-HP, not M55-HE). Making both a
+# Kconfig option (rather than fixing the two literals in place) means the
+# NEXT bench shape that turns out different from this one is a
+# `west build ... -- -DCONFIG_DEMO_RELEASE_PEER_CPU_ID=...` away, not
+# another main.c edit.
+
+config DEMO_RELEASE_PEER_CPU_ID
+	int "SE-domain CPU id of the peer core alif_se_boot_cpu() releases"
+	default 2
+	help
+	  SE-domain CPU id for BOOT_CPU (service_id 501)'s send_cpu_id field,
+	  per modules/alif-se-boot/include/alif_se_boot.h's
+	  ALIF_SE_BOOT_CPU_* constants:
+
+	    0 = A32_0
+	    1 = A32_1
+	    2 = M55_HP (EXTSYS_0)   <- default: bench-proven, see below
+	    3 = M55_HE (EXTSYS_1)
+
+	  Default 2 (M55_HP) matches the bench-proven shape on E1M-AEN801
+	  silicon (2026-07-30): the SES-booted cluster runs this app's RPMsg
+	  HOST logic and calls alif_se_boot_cpu() to release the OTHER
+	  cluster, M55-HP -- see docs/BENCH-DUALCORE.md for the full
+	  procedure. That is the MIRROR of what this option's old hardcoded
+	  equivalent used: 3 (M55_HE), which asks the SE to release the WRONG
+	  cluster for the proven shape.
+
+config DEMO_RELEASE_PEER_ENTRY
+	hex "Entry address reported to the SE for the released peer core"
+	default 0x50000000
+	help
+	  ITCM global alias for the peer core selected by
+	  DEMO_RELEASE_PEER_CPU_ID, confirmed from alp-sdk's board DTs:
+
+	    M55_HP itcm global_base = 0x50000000  <- default (pairs with cpu id 2 above)
+	    M55_HE itcm global_base = 0x58000000
+	    M55_HP dtcm global_base = 0x50800000
+	    M55_HE dtcm global_base = 0x58800000
+
+	  On the bench-proven path (a debugger-placed image at the released
+	  core's LOCAL address 0 -- see docs/BENCH-DUALCORE.md) this value is
+	  EFFECTIVELY DECORATIVE: the released core comes up with
+	  VTOR == 0x00000000 and fetches its initial SP/PC from its own
+	  LOCAL 0x00000000, not from this address. It is still passed to
+	  alif_se_boot_cpu() because a future SES-ATOC-based release (a
+	  two-entry ATOC with the peer entry flagged ["load"]) WOULD use it
+	  as the loadAddress/entry point -- see src/main.c.
+
+config DEMO_EXECUTION_BREADCRUMB
+	bool "Write execution breadcrumbs to global SRAM0 (bench diagnostic)"
+	default n
+	help
+	  DIAGNOSTIC ONLY -- OFF by default, not part of the shipped image.
+	  Enable explicitly with `-DEXTRA_CONF_FILE=breadcrumb.conf`
+	  (../breadcrumb.conf), the same opt-in shape ../ram-console.conf
+	  uses; do not flip this default instead.
+
+	  When enabled, src/main.c writes fifteen fixed 32-bit words to global
+	  SRAM0 (0x02000000 through 0x02000038) -- see the top-of-file comment
+	  above breadcrumb_mark_early() in src/main.c for exactly which word
+	  means what, why those addresses were picked over this app's own
+	  DTCM, and why each is followed by an explicit cache flush. The full
+	  map:
+
+	    0x02000000  BREADCRUMB_MAGIC_EARLY (0x5A5AA5A5), written as early
+	                as this build can honestly reach (a SYS_INIT(EARLY, 0)
+	                hook)
+	    0x02000004  BREADCRUMB_MAGIC_PRE_RELEASE (0xA5A55A5A), written
+	                immediately before the SE peer-release sequence
+	                (alif_se_start_cpu(), or its decomposed equivalent --
+	                see 0x02000030 below)
+	    0x02000008  BREADCRUMB_MAGIC_POST_RELEASE (0x5A5A5A5A), written as
+	                the FIRST thing after that sequence returns
+	    0x0200000C  the sequence's verbatim overall int return value (not
+	                a magic; see alif_se_boot.h's shared retval contract)
+	    0x02000010  se_mhu_tx PID0        0x02000020  se_mhu_rx PID0
+	    0x02000014  se_mhu_tx CID0        0x02000024  se_mhu_rx CID0
+	    0x02000018  se_mhu_tx PID1        0x02000028  se_mhu_rx PID1
+	    0x0200001C  se_mhu_tx CID1        0x0200002C  se_mhu_rx CID1
+	    0x02000030  alif_se_set_vtor()'s own verbatim int return value
+	    0x02000034  alif_se_reset_cpu()'s own verbatim int return value
+	                (present only if 0x02000030 was 0)
+	    0x02000038  alif_se_release_cpu()'s own verbatim int return value
+	                (present only if 0x02000030 AND 0x02000034 were 0)
+
+	  The eight SE-MHU words are the SE-service MHUv2 frame pair's own
+	  CoreSight identification registers, read BEFORE 0x02000004 from the
+	  same devicetree nodes modules/alif-se-boot uses -- a genuine ARM
+	  MHUv2 block reads PID0=0x76, CID0=0x0D; anything else there means
+	  this core was not looking at a live MHU at that address, independent
+	  of whatever the release sequence itself later reports.
+
+	  The three words at 0x02000030-0x02000038 exist because
+	  alif_se_start_cpu() is now three separate SE service calls
+	  (SET_VTOR, RESET_CPU, RELEASE_CPU, each stopping the sequence if it
+	  fails) -- 0x02000008/0x0200000C above only bracket the whole
+	  sequence and cannot say which of the three a failure belongs to.
+	  With this option on, src/main.c calls alif_se_set_vtor() /
+	  alif_se_reset_cpu() / alif_se_release_cpu() directly instead of
+	  alif_se_start_cpu(), in the same order and with the same
+	  stop-at-first-failure behaviour, so each step's own return value can
+	  be breadcrumbed as it happens; with this option off, src/main.c
+	  calls alif_se_start_cpu() as a single call and only the
+	  0x02000004/0x02000008/0x0200000C breadcrumbs apply.
+
+	  A debugger reading global SRAM0 out of a bare hex dump, with no
+	  source tree in front of it, can then tell "this core never
+	  executed" apart from "it was not talking to a real MHU at the
+	  SE-service address at all" apart from "it executed and started the
+	  release sequence, but nothing in it ever returned" apart from "the
+	  sequence returned, and something after that took the core down"
+	  apart from -- with this option on -- exactly which of SET_VTOR /
+	  RESET_CPU / RELEASE_CPU got that far.
+
+config DEMO_RELEASE_VIA_TOC_ENTRY
+	bool "Release the peer via SE PROCESS_TOC_ENTRY instead of BOOT_CPU/SET_VTOR/RESET_CPU/RELEASE_CPU"
+	default n
+	help
+	  OFF by default -- src/main.c keeps calling alif_se_start_cpu()
+	  (or, with CONFIG_DEMO_EXECUTION_BREADCRUMB on, its decomposed
+	  SET_VTOR/RESET_CPU/RELEASE_CPU form), the shape this repo's
+	  BENCH-DUALCORE.md documents as bench-proven-to-the-lockup-cause. This
+	  option does not touch that default path at all.
+
+	  When ON, src/main.c instead calls
+	  alif_se_process_toc_entry("ALP-HP") (modules/alif-se-boot,
+	  SE service_id 500) -- a DIFFERENT release mechanism: instead of this
+	  core telling the SE "release cpu_id at entry_addr" against an entry
+	  SES already auto-loaded-but-not-booted at cold boot (the current
+	  `["load"]`-only ATOC shape, which the SES table reports `uLV` --
+	  Loaded+Verified, not Booted), this call tells the SE "now go ahead
+	  and process the ATOC entry named ALP-HP", with SES itself doing
+	  whatever load/verify/boot that entry's own flags call for AT THIS
+	  CALL. See alif_se_process_toc_entry()'s doc comment in
+	  modules/alif-se-boot/include/alif_se_boot.h for the full account,
+	  including what is and is NOT yet known about the ATOC JSON field
+	  that must mark the ALP-HP entry DEFERRED for this path to have
+	  anything to un-defer -- that entry's ATOC MUST be built with that
+	  entry DEFERRED, or this call has nothing to do and will report
+	  whatever the SE does for an already-non-deferred entry (untested).
+
+	  "ALP-HP" is not a Kconfig string here (unlike
+	  DEMO_RELEASE_PEER_CPU_ID/DEMO_RELEASE_PEER_ENTRY above) because this
+	  path names an ATOC entry, not a numeric SE-domain CPU id or address
+	  -- there is exactly one such entry in this repo's dual-core ATOC
+	  shape today, so a literal in src/main.c (DEMO_RELEASE_TOC_ENTRY_ID)
+	  is the whole of it; promote it to a Kconfig string if a second ATOC
+	  shape ever needs a different entry name.
+
+	  The outcome is recorded at 0x02000040 (global SRAM0) when
+	  CONFIG_DEMO_EXECUTION_BREADCRUMB is ALSO on -- a NEW address, chosen
+	  because it does not collide with any word in the existing breadcrumb
+	  map (0x02000000-0x02000038, see CONFIG_DEMO_EXECUTION_BREADCRUMB's
+	  own help text above) or with dualcore_remote's beacon
+	  (0x02000100-0x02000114, see apps/dualcore_remote). With
+	  CONFIG_DEMO_EXECUTION_BREADCRUMB off, this option still changes which
+	  SE call src/main.c makes, but nothing is breadcrumbed (the whole
+	  breadcrumb_write() helper and its <zephyr/cache.h> include are
+	  compiled only under that other option) -- pair the two
+	  (`-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y -DEXTRA_CONF_FILE=breadcrumb.conf`)
+	  to get both the alternate release path and a bench-readable record of
+	  its result.
+
+config DEMO_RELEASE_TOC_THEN_BOOT
+	bool "Release the peer via SE PROCESS_TOC_ENTRY, then BOOT_CPU, in that order"
+	default n
+	help
+	  OFF by default. Independent of CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY above
+	  -- both are plain bools here, not a choice group, matching this file's
+	  existing shape -- but src/main.c's #if/#elif chain gives this option
+	  priority if both were somehow enabled at once, so only one release
+	  strategy is ever compiled into a given build.
+
+	  Tests the remaining candidate after CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY
+	  alone: on E1M-AEN801 silicon (2026-07-31), un-deferring the ALP-HP
+	  ATOC entry via alif_se_process_toc_entry() (SE service_id 500,
+	  PROCESS_TOC_ENTRY) bench-confirmed it MATERIALIZES the peer's image at
+	  CONFIG_DEMO_RELEASE_PEER_ENTRY (0x50000000) -- SRAM there went from
+	  uninitialized to the staged binary's first 16 words, all matching, in
+	  one boot -- but the peer core still did not start executing (its
+	  beacon at 0x02000100 never reached 0xC3C33C3C). This option follows
+	  that same un-defer call with this file's original alif_se_boot_cpu()
+	  release call (service_id 501, BOOT_CPU) against the SAME
+	  cpu_id/entry CONFIG_DEMO_RELEASE_PEER_CPU_ID/DEMO_RELEASE_PEER_ENTRY
+	  already name, stopping at the first failure, in case the peer needs
+	  that explicit release even after un-deferring has placed its image.
+
+	  Retvals, when CONFIG_DEMO_EXECUTION_BREADCRUMB is ALSO on:
+	  PROCESS_TOC_ENTRY's own retval is written to 0x02000040 -- the SAME
+	  word CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY writes, since both strategies
+	  call the identical step 1. BOOT_CPU's own retval is written to
+	  0x02000048 -- present ONLY if PROCESS_TOC_ENTRY returned 0 -- chosen
+	  to skip 0x02000044, which the bench has observed holding
+	  uninitialized SRAM garbage and has been useful as a written-vs-not
+	  control; leaving it alone keeps that control valid. Pair
+	  (`-DCONFIG_DEMO_RELEASE_TOC_THEN_BOOT=y -DEXTRA_CONF_FILE=breadcrumb.conf`)
+	  to get both this release path and a bench-readable record of which
+	  step, if either, objected.
+
+source "Kconfig.zephyr"

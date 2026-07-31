@@ -3,19 +3,26 @@
  * Copyright 2026 Alp Lab AB
  *
  * Client for the Alif Secure Enclave's BOOT_CPU service (service_id 501),
- * used on Alif E8 (Ensemble) silicon to release a secondary RTSS core (e.g.
- * RTSS-HE) from a core that already has SE access (RTSS-HP).
+ * used on Alif E8 (Ensemble) silicon to release a secondary RTSS core from a
+ * core that already has SE access. On the E1M-AEN801 bench unit that is
+ * RTSS-HE releasing RTSS-HP -- see docs/BENCH-DUALCORE.md section 0; which
+ * cluster has SE access is a per-silicon boot-order fact, not always
+ * RTSS-HP.
  *
  * ============================== PROVENANCE ==============================
- * AUTHORED FROM THE PROTOCOL, NOT FROM ALIF'S SOURCE. This file was written
- * against a transcription of the SE service request/response layout and the
- * MHU-based transport sequence -- it does not copy, adapt, or lift any code
- * or text from Alif's se_services sources. That matters here specifically:
+ * The wire layouts, field order, and service ids used below (service_id
+ * 501/502/503/505, the SE service request/response struct shape, the
+ * MHU-based transport sequence, the SET_VTOR/RESET_CPU/RELEASE_CPU call
+ * ordering) are interoperability facts read from Alif's DFP se_services
+ * headers: they describe the on-the-wire protocol the SE expects and cannot
+ * be expressed differently and still work. No code, comment text, or doc
+ * prose from those headers was copied into this file -- every function body
+ * and comment below is this project's own words. Worth noting separately:
  * three of Alif's se_services headers carry an SPDX-License-Identifier:
  * Apache-2.0 line whose body text then asserts an "All Rights Reserved /
  * Alif Semiconductor Software License Agreement" -- a self-contradictory
- * pairing this project does not want to inherit by copying from it. Every
- * type, constant, and function body below is this project's own.
+ * pairing, noted here as a factual observation about those headers, not a
+ * claim about this file.
  *
  * The MHUv2 register offsets used here (channel-window SET/STAT/CLEAR,
  * ACCESS_REQUEST/ACCESS_READY) are the same ARM DDI 0515 facts already
@@ -63,7 +70,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 
+#include <zephyr/cache.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -137,16 +146,19 @@ struct alif_se_boot_svc_body {
 } __packed;
 
 /*
- * Shared 20-byte wire shape for every boot-domain service this file speaks:
- * BOOT_CPU (501) confirmed by the protocol brief, and SET_VTOR (505) by
- * INFERENCE (see ALIF_SE_SVC_SET_VTOR below and alif_se_set_vtor()'s doc
- * comment in include/alif_se_boot.h -- no dedicated `set_vtor_svc_t` was
- * found in the transcribed protocol; this reuses the BOOT_CPU struct shape
- * because the vendor's declared wrappers for both services share the same
- * (handle, cpu_id, address, error_code) signature). The heartbeat
- * (se_heartbeat_wait() below) also reuses this struct as an oversized
- * buffer for a smaller `generic_svc_t`-shaped reply -- see that function's
- * comment for why that is safe.
+ * Shared 20-byte wire shape for BOOT_CPU (501) and SET_VTOR (505) -- both
+ * CONFIRMED by Alif's DFP se_services headers to use this same shape
+ * (`boot_cpu_svc_t`: header plus `send_cpu_id` plus `send_address` plus
+ * `resp_error_code`), varying only `header.service_id`. An earlier revision
+ * of this file could only INFER that SET_VTOR reused BOOT_CPU's struct, from
+ * the vendor's declared wrapper signatures sharing the same
+ * (handle, cpu_id, address, error_code) shape -- see ALIF_SE_SVC_SET_VTOR
+ * below and alif_se_set_vtor()'s doc comment in include/alif_se_boot.h for
+ * that history. RESET_CPU (503) and RELEASE_CPU (502) do NOT share this
+ * shape -- see struct alif_se_control_svc_request below. The heartbeat
+ * (se_heartbeat_wait() below) also reuses this struct as an oversized buffer
+ * for a smaller `generic_svc_t`-shaped reply -- see that function's comment
+ * for why that is safe.
  */
 struct alif_se_boot_svc_request {
 	struct alif_se_service_header header;
@@ -175,20 +187,128 @@ BUILD_ASSERT(offsetof(struct alif_se_boot_svc_request, body.send_address) == 12,
 BUILD_ASSERT(offsetof(struct alif_se_boot_svc_request, body.resp_error_code) == 16,
 	     "body.resp_error_code must stay at offset 16");
 
-/* service_id for BOOT_CPU, per the protocol brief. This client implements
- * only this one service; PROCESS_TOC_ENTRY (500) / RELEASE_CPU (502) /
- * RESET_CPU (503) are documented facts about the same service class but are
- * out of scope for this file. */
+/*
+ * The 16-byte SE control-CPU request/response structure used by RELEASE_CPU
+ * (502) and RESET_CPU (503), CONFIRMED by Alif's DFP se_services headers
+ * (`control_cpu_svc_t`): the same 8-byte header as struct
+ * alif_se_boot_svc_request above, but only a 4-byte `send_cpu_id` and a
+ * 4-byte `resp_error_code` -- NO address field. RESET_CPU and RELEASE_CPU
+ * each take only a target cpu_id; neither carries an address of its own.
+ */
+struct alif_se_control_svc_body {
+	uint32_t          send_cpu_id;
+	volatile uint32_t resp_error_code; /* SE-written: service-result error; volatile for
+					     * the same reason as
+					     * alif_se_boot_svc_body.resp_error_code above. */
+} __packed;
+
+struct alif_se_control_svc_request {
+	struct alif_se_service_header   header;
+	struct alif_se_control_svc_body body;
+} __packed;
+
+/* MINOR 4, applied to the control-CPU struct too: pin both the total size
+ * and every SE-visible field's offset. */
+BUILD_ASSERT(sizeof(struct alif_se_control_svc_request) == 16,
+	     "alif_se_control_svc_request must stay exactly 16 bytes (protocol wire layout)");
+BUILD_ASSERT(offsetof(struct alif_se_control_svc_request, header.service_id) == 0,
+	     "header.service_id must stay at offset 0");
+BUILD_ASSERT(offsetof(struct alif_se_control_svc_request, header.flags) == 2,
+	     "header.flags must stay at offset 2");
+BUILD_ASSERT(offsetof(struct alif_se_control_svc_request, header.error_code) == 4,
+	     "header.error_code must stay at offset 4");
+BUILD_ASSERT(offsetof(struct alif_se_control_svc_request, body.send_cpu_id) == 8,
+	     "body.send_cpu_id must stay at offset 8");
+BUILD_ASSERT(offsetof(struct alif_se_control_svc_request, body.resp_error_code) == 12,
+	     "body.resp_error_code must stay at offset 12");
+
+/*
+ * The 20-byte SE PROCESS_TOC_ENTRY (service_id 500) request/response
+ * structure, CONFIRMED by Alif's DFP se_services headers
+ * (`process_toc_entry_svc_t` in services_lib_protocol.h): the same 8-byte
+ * header as every other struct in this file, but an 8-byte `send_entry_id`
+ * (the TOC entry's `image_identifier` -- an ASCII name, NOT a cpu_id) in
+ * place of BOOT_CPU/SET_VTOR's `send_cpu_id`+`send_address` pair. Same total
+ * size as struct alif_se_boot_svc_request (20 bytes) but a DIFFERENT field
+ * layout past the header -- this is why PROCESS_TOC_ENTRY needs its own
+ * struct rather than reusing either existing one. `ALIF_SE_TOC_ENTRY_ID_LEN`
+ * (8) is `IMAGE_NAME_LENGTH` per the DFP header, transcribed here rather than
+ * included from it -- see this file's PROVENANCE header for why this module
+ * never includes an Alif se_services header directly.
+ */
+#define ALIF_SE_TOC_ENTRY_ID_LEN 8U
+
+struct alif_se_toc_entry_svc_body {
+	uint8_t           send_entry_id[ALIF_SE_TOC_ENTRY_ID_LEN];
+	volatile uint32_t resp_error_code; /* SE-written: service-result error; volatile for
+					     * the same reason as
+					     * alif_se_boot_svc_body.resp_error_code above. */
+} __packed;
+
+struct alif_se_toc_entry_svc_request {
+	struct alif_se_service_header     header;
+	struct alif_se_toc_entry_svc_body body;
+} __packed;
+
+/* MINOR 4, applied to the TOC-entry struct too: pin both the total size and
+ * every SE-visible field's offset. */
+BUILD_ASSERT(sizeof(struct alif_se_toc_entry_svc_request) == 20,
+	     "alif_se_toc_entry_svc_request must stay exactly 20 bytes (protocol wire layout)");
+BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, header.service_id) == 0,
+	     "header.service_id must stay at offset 0");
+BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, header.flags) == 2,
+	     "header.flags must stay at offset 2");
+BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, header.error_code) == 4,
+	     "header.error_code must stay at offset 4");
+BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, body.send_entry_id) == 8,
+	     "body.send_entry_id must stay at offset 8");
+BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, body.resp_error_code) == 16,
+	     "body.resp_error_code must stay at offset 16");
+
+/*
+ * service_id for PROCESS_TOC_ENTRY, confirmed by Alif's DFP se_services
+ * headers (services_lib_ids.h's `SERVICE_BOOT_START == SERVICE_BOOT_PROCESS_TOC_ENTRY
+ * == 500`, the first id in the BOOT service block -- SERVICE_BOOT_CPU (501)
+ * immediately follows it). Per services_host_boot.c's doc comment on
+ * `SERVICES_boot_process_toc_entry()`: the named TOC entry must already be in
+ * a DEFERRED state (not auto-processed by SES at cold boot); this service
+ * call un-defers it, which -- depending on that entry's OWN flags (`load`,
+ * `boot`) -- can load and/or boot the CPU the entry names. See
+ * alif_se_process_toc_entry()'s doc comment in include/alif_se_boot.h for
+ * what is and is not yet known about which ATOC JSON field produces the
+ * DEFERRED flag.
+ */
+#define ALIF_SE_SVC_PROCESS_TOC_ENTRY 500U
+
+/* service_id for BOOT_CPU, confirmed by Alif's DFP se_services headers
+ * (services_lib_ids.h's SERVICE_BOOT_CPU = 501). */
 #define ALIF_SE_SVC_BOOT_CPU 501U
 
 /*
- * service_id for SET_VTOR, per the protocol brief's service enum
- * (SERVICE_BOOT_START=500 .. SERVICE_BOOT_END=599, SET_VTOR at 505, between
- * RESET_CPU=503/RESET_SOC=504 and SET_ARGS=506). INFERENCE about the WIRE
- * STRUCT only, not about this numeric id: see the comment on
+ * service_id for SET_VTOR, confirmed the same way (SERVICE_BOOT_SET_VTOR =
+ * 505). The WIRE STRUCT reuse is confirmed too now -- see the comment on
  * struct alif_se_boot_svc_request above.
  */
 #define ALIF_SE_SVC_SET_VTOR 505U
+
+/*
+ * service_id for RELEASE_CPU, confirmed by Alif's DFP se_services headers
+ * (services_lib_ids.h's SERVICE_BOOT_RELEASE_CPU = 502) and by
+ * services_lib_protocol.h's dedicated `control_cpu_svc_t` wire struct (see
+ * struct alif_se_control_svc_request above). This is the step that actually
+ * starts a core running, once RESET_CPU (below) has transferred its VTOR.
+ */
+#define ALIF_SE_SVC_RELEASE_CPU 502U
+
+/*
+ * service_id for RESET_CPU, confirmed the same way (SERVICE_BOOT_RESET_CPU =
+ * 503). Per Alif's own documented behaviour of `SERVICES_boot_reset_cpu()`:
+ * for an M55 core, this call transfers the value a prior SET_VTOR wrote into
+ * the SE's Global VTOR register into that core's own internal VTOR register
+ * -- SET_VTOR alone only ever touches the global one. That is the fact this
+ * whole fix rests on: see alif_se_start_cpu() below.
+ */
+#define ALIF_SE_SVC_RESET_CPU 503U
 
 /*
  * MAJOR 2: service_id for the maintenance heartbeat. Per the protocol brief,
@@ -236,12 +356,15 @@ static inline mm_reg_t se_boot_tx_base(void)
 
 /*
  * The request/response structure lives at the base of this node's
- * `memory-region` carve-out (see the DT binding: a small, non-cacheable
- * SRAM0 slice that is ALREADY at the same address from every bus master --
- * no local-to-global address translation is needed, unlike a TCM-resident
- * buffer). Its size (20 bytes) is asserted against the carve-out's DT `reg`
- * size at build time below, so a too-small overlay carve-out fails the build
- * instead of silently corrupting an SRAM neighbour.
+ * `memory-region` carve-out (see the DT binding: a small SRAM0 slice that is
+ * ALREADY at the same address from every bus master -- no local-to-global
+ * address translation is needed, unlike a TCM-resident buffer). It is NOT
+ * MPU-NOCACHE on this build -- see se_transport_transact()'s flush/invalidate
+ * comments for the verified detail -- so it is maintained by hand like any
+ * other cached buffer shared with the SE. Its size (20 bytes) is asserted
+ * against the carve-out's DT `reg` size at build time below, so a too-small
+ * overlay carve-out fails the build instead of silently corrupting an SRAM
+ * neighbour.
  */
 #define SE_REQ_BASE DT_REG_ADDR(DT_INST_PHANDLE(0, memory_region))
 
@@ -270,20 +393,23 @@ static int se_clamp_positive_error(uint32_t raw)
 }
 
 /*
- * One SE-service MHUv2 transport transaction against *req (which must
- * already hold a fully-built request at SE_REQ_BASE): wake, send, wait for
- * send-ack, wait for the reply, drain it. Shared by both se_heartbeat_wait()
- * and alif_se_boot_cpu() (MAJOR 2: both must use the SAME transport path, not
- * a duplicated copy). Interprets no reply CONTENT -- heartbeat and BOOT_CPU
- * read *req's fields differently once this returns 0, so that stays the
- * caller's job.
+ * One SE-service MHUv2 transport transaction against whatever request the
+ * caller has already built in place at SE_REQ_BASE: wake, send, wait for
+ * send-ack, wait for the reply, drain it. Shared by every caller in this
+ * file (heartbeat, BOOT_CPU, SET_VTOR, RESET_CPU, RELEASE_CPU -- MAJOR 2:
+ * all must use the SAME transport path, not a duplicated copy). Takes no
+ * request-struct pointer: every request this file builds lives at the same
+ * fixed SE_REQ_BASE address regardless of its wire shape, and this function
+ * never reads or writes request/response FIELDS itself -- only the caller,
+ * which already knows which of the two wire shapes it built, does that
+ * after this returns 0.
  *
  * Returns 0 once the SE's reply has been received and drained. Returns a
  * negative errno (-ETIMEDOUT) for a LOCAL transport failure -- no SE-side
  * outcome is known in that case, matching this module's documented retval
  * contract. Caller must already hold se_boot_lock.
  */
-static int se_transport_transact(struct alif_se_boot_svc_request *req, mm_reg_t tx, mm_reg_t rx)
+static int se_transport_transact(mm_reg_t tx, mm_reg_t rx)
 {
 	uint32_t i;
 	uint32_t pending;
@@ -316,19 +442,45 @@ static int se_transport_transact(struct alif_se_boot_svc_request *req, mm_reg_t 
 
 	/*
 	 * (1) Struct is now at an address the SE can read (SE_REQ_BASE is
-	 *     inside a `zephyr,memory-region` carve-out that is globally
-	 *     addressable AND mapped ATTR_MPU_RAM_NOCACHE by the board overlay
-	 *     -- see the DT binding). (2) Barrier the caller's stores so they
-	 *     are visible before we ring the SE's doorbell below; even on a
-	 *     non-cacheable mapping the store and the following MMIO write are
-	 *     otherwise free to reorder relative to each other. (3) No D-cache
-	 *     flush is issued here -- deliberately: unlike a TCM-resident
-	 *     request buffer (which the vendor transport must flush because its
-	 *     TCM mapping is cacheable), this carve-out is already
-	 *     non-cacheable, so there is no dirty cache line to push out. This
-	 *     is the "SIMPLIFICATION" from the task brief made concrete in
-	 *     code, not merely asserted in a comment.
+	 *     inside a `zephyr,memory-region` carve-out -- see the DT binding).
+	 *     (2) Flush it out of the D-cache before ringing the SE's doorbell.
+	 *
+	 * An earlier revision of this comment claimed the overlay's
+	 * `zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>` made this
+	 * carve-out non-cacheable, so no flush was needed. That claim was never
+	 * checked against the actual build and was WRONG: `zephyr,memory-attr`
+	 * only feeds Zephyr's mem-attr *lookup* API (`CONFIG_MEM_ATTR`) and the
+	 * linker script -- it does not by itself program an ARM MPU region.
+	 * Whether SE_REQ_BASE ends up non-cacheable depends entirely on whether
+	 * something *else* also covers it with an MPU NOCACHE attribute (either
+	 * the SoC's static `mpu_regions[]` table, or `CONFIG_NOCACHE_MEMORY`
+	 * wrapping the linker region in an MPU region Zephyr programs at boot).
+	 * Neither is true for this board's Kconfig: `CONFIG_NOCACHE_MEMORY` is
+	 * off, and the flashed image's own `mpu_config` table has exactly two
+	 * regions, `FLASH_0` and `SRAM_0` -- neither covers 0x02020000. So on
+	 * this build the carve-out sits under the ARMv8-M *default* memory map
+	 * with `CONFIG_DCACHE=y`, and must be flushed by hand before the SE
+	 * reads it, exactly as the vendor transport flushes its (cacheable TCM)
+	 * request buffer before send -- see
+	 * se_services/source/services_host_handler.c:225-226 in the Alif DFP
+	 * reference tree (`RTSS_CleanDCache_by_Addr()`), cited here as a FACT
+	 * about the vendor's own transport, not copied from it (see this file's
+	 * PROVENANCE header). Note this is *not* a full explanation of the
+	 * observed no-reply symptom on its own: the ARMv8-M default attributes
+	 * for this address range (Code region) are Normal, Write-Through --
+	 * under a genuinely write-through mapping a missing clean would not by
+	 * itself withhold a store from memory. What is established is narrower
+	 * and still sufficient reason to fix this: the prior comment's claim
+	 * that the buffer is MPU-NOCACHE was false, and doing the same
+	 * maintenance the vendor does is the correct, low-risk step regardless
+	 * of how much of the symptom it explains.
 	 */
+	sys_cache_data_flush_range((void *)SE_REQ_BASE, sizeof(struct alif_se_boot_svc_request));
+
+	/* Barrier the caller's stores (and the flush above) so they are
+	 * visible before we ring the SE's doorbell below; the store and the
+	 * following MMIO write are otherwise free to reorder relative to each
+	 * other. */
 	barrier_dmem_fence_full();
 
 	/* Wake handshake before ringing: assert ACCESS_REQUEST and spin for
@@ -392,12 +544,28 @@ static int se_transport_transact(struct alif_se_boot_svc_request *req, mm_reg_t 
 	sys_write32(pending, rx + SE_MHU_RX_CH0_CLEAR);
 
 	/*
-	 * (7) "Invalidate the cache... and read resp_error_code": as with the
-	 * flush on the way in, there is no cache to invalidate here -- the
-	 * carve-out is non-cacheable, so this barrier plus a direct read is the
-	 * whole of step 7 on this memory. The barrier orders the RX-doorbell
-	 * read above against the struct read the caller does next.
+	 * (7) Invalidate the request/response buffer before the caller reads
+	 * any field the SE wrote back into it (resp_error_code, header.error_code).
+	 * Same correction as the comment on the way in above: this carve-out is
+	 * not MPU-NOCACHE on this build (no MPU region covers SE_REQ_BASE, see
+	 * the flush-side comment for the verified detail), so a stale, CLEAN
+	 * cache line here could hide the SE's write from this core's next read --
+	 * this region's default ARMv8-M attributes are Normal, Write-Through (see
+	 * the flush-side comment), so a line here is never dirty; the hazard is
+	 * this core's own cached copy of the response bytes, filled from an
+	 * earlier read of the same address before the SE's write happened, and a
+	 * plain load would return that stale clean data forever without this
+	 * invalidate. Under write-through the flush above is close to a no-op --
+	 * this invalidate is the half of the pair that plausibly explains the
+	 * observed -116; that is a diagnosis, not a proof, and the bench is what
+	 * settles it. Mirrors the vendor transport's post-reply
+	 * `RTSS_InvalidateDCache_by_Addr()` -- see
+	 * se_services/source/services_host_handler.c:248-249 in the Alif DFP
+	 * reference tree, cited as a fact about the vendor's own transport (see
+	 * this file's PROVENANCE header). The barrier below still orders the
+	 * RX-doorbell read above against the struct read the caller does next.
 	 */
+	sys_cache_data_invd_range((void *)SE_REQ_BASE, sizeof(struct alif_se_boot_svc_request));
 	barrier_dmem_fence_full();
 
 deassert:
@@ -450,7 +618,7 @@ static int se_heartbeat_wait(mm_reg_t tx, mm_reg_t rx)
 		req->body.send_address    = 0U;
 		req->body.resp_error_code = 0U;
 
-		ret = se_transport_transact(req, tx, rx);
+		ret = se_transport_transact(tx, rx);
 		if (ret == 0) {
 			if (req->header.error_code != 0U) {
 				LOG_WRN("SE heartbeat replied with error_code=%u on attempt "
@@ -476,6 +644,83 @@ static int se_heartbeat_wait(mm_reg_t tx, mm_reg_t rx)
 	 * that reason -- it is not otherwise used anywhere in this file.
 	 */
 	return -ENOTCONN;
+}
+
+int alif_se_process_toc_entry(const char *image_id)
+{
+	struct alif_se_toc_entry_svc_request *req = (struct alif_se_toc_entry_svc_request *)SE_REQ_BASE;
+	mm_reg_t                              tx  = se_boot_tx_base();
+	mm_reg_t                              rx  = se_boot_rx_base();
+	int                                   ret;
+
+	/* Same gating as every other call in this file -- see
+	 * alif_se_boot_cpu()'s comments above for why each step exists. Routed
+	 * through the SAME se_transport_transact() path as every other service
+	 * (MAJOR 2, this file's own top-of-file comment on
+	 * se_transport_transact()) -- no second transport for this service. */
+	k_mutex_lock(&se_boot_lock, K_FOREVER);
+
+	if (sys_read32(tx + SE_MHU_TX_CH0_STAT) != 0U) {
+		LOG_ERR("SE-service TX channel busy (unacked prior request)");
+		k_mutex_unlock(&se_boot_lock);
+		return -EBUSY;
+	}
+
+	ret = se_heartbeat_wait(tx, rx);
+	if (ret != 0) {
+		LOG_ERR("SE never woke for its readiness heartbeat (%d) -- "
+			"PROCESS_TOC_ENTRY(image_id=%.8s) NOT sent",
+			ret, image_id);
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	req->header.service_id = ALIF_SE_SVC_PROCESS_TOC_ENTRY;
+	req->header.flags      = 0U;
+	req->header.error_code = 0U;
+	req->header.reserved   = 0U;
+
+	/*
+	 * Same strncpy() semantics Alif's own SERVICES_boot_process_toc_entry()
+	 * wrapper uses (per services_host_boot.c, cited as a fact about the
+	 * vendor's own transport -- see this file's PROVENANCE header, no code
+	 * copied): copies at most ALIF_SE_TOC_ENTRY_ID_LEN bytes, zero-padding
+	 * any remainder. `send_entry_id` is the TOC's raw fixed-width 8-byte
+	 * `image_identifier` field, NOT a C string -- if @p image_id is exactly
+	 * 8 bytes or longer, the field intentionally ends up WITHOUT a NUL
+	 * terminator (matching the TOC entry name format), so this field must
+	 * never be read back with a plain %s.
+	 */
+	strncpy((char *)req->body.send_entry_id, image_id, ALIF_SE_TOC_ENTRY_ID_LEN);
+	req->body.resp_error_code = 0U;
+
+	ret = se_transport_transact(tx, rx);
+	if (ret != 0) {
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	if (req->header.error_code != 0U) {
+		LOG_ERR("SE transport-layer error_code=%u for PROCESS_TOC_ENTRY(image_id=%.8s)",
+			req->header.error_code, image_id);
+	}
+	if (req->body.resp_error_code != 0U) {
+		LOG_ERR("SE service error resp_error_code=%u for PROCESS_TOC_ENTRY(image_id=%.8s)",
+			req->body.resp_error_code, image_id);
+	}
+
+	if (req->header.error_code == 0U && req->body.resp_error_code == 0U) {
+		LOG_INF("SE PROCESS_TOC_ENTRY(image_id=%.8s) succeeded (entry un-deferred)",
+			image_id);
+		k_mutex_unlock(&se_boot_lock);
+		return 0;
+	}
+
+	k_mutex_unlock(&se_boot_lock);
+
+	return (req->body.resp_error_code != 0U)
+		       ? se_clamp_positive_error(req->body.resp_error_code)
+		       : se_clamp_positive_error(req->header.error_code);
 }
 
 int alif_se_boot_cpu(uint32_t cpu_id, uint32_t entry_addr)
@@ -520,7 +765,7 @@ int alif_se_boot_cpu(uint32_t cpu_id, uint32_t entry_addr)
 	req->body.send_address    = entry_addr;
 	req->body.resp_error_code = 0U;
 
-	ret = se_transport_transact(req, tx, rx);
+	ret = se_transport_transact(tx, rx);
 	if (ret != 0) {
 		k_mutex_unlock(&se_boot_lock);
 		return ret;
@@ -564,7 +809,7 @@ int alif_se_set_vtor(uint32_t cpu_id, uint32_t vtor_addr)
 	/* Same gating as alif_se_boot_cpu() -- see its comments above for why
 	 * each step exists. This function is structurally identical to
 	 * alif_se_boot_cpu(), differing only in the service_id sent and the
-	 * log labels, per this file's INFERENCE that SET_VTOR reuses the
+	 * log labels, per this file's CONFIRMED fact that SET_VTOR reuses the
 	 * BOOT_CPU wire struct (see struct alif_se_boot_svc_request's comment
 	 * and ALIF_SE_SVC_SET_VTOR's comment above). */
 	k_mutex_lock(&se_boot_lock, K_FOREVER);
@@ -592,7 +837,7 @@ int alif_se_set_vtor(uint32_t cpu_id, uint32_t vtor_addr)
 	req->body.send_address    = vtor_addr;
 	req->body.resp_error_code = 0U;
 
-	ret = se_transport_transact(req, tx, rx);
+	ret = se_transport_transact(tx, rx);
 	if (ret != 0) {
 		k_mutex_unlock(&se_boot_lock);
 		return ret;
@@ -609,6 +854,132 @@ int alif_se_set_vtor(uint32_t cpu_id, uint32_t vtor_addr)
 
 	if (req->header.error_code == 0U && req->body.resp_error_code == 0U) {
 		LOG_INF("SE SET_VTOR(cpu_id=%u, vtor=0x%08x) succeeded", cpu_id, vtor_addr);
+		k_mutex_unlock(&se_boot_lock);
+		return 0;
+	}
+
+	k_mutex_unlock(&se_boot_lock);
+
+	return (req->body.resp_error_code != 0U)
+		       ? se_clamp_positive_error(req->body.resp_error_code)
+		       : se_clamp_positive_error(req->header.error_code);
+}
+
+int alif_se_reset_cpu(uint32_t cpu_id)
+{
+	struct alif_se_control_svc_request *req = (struct alif_se_control_svc_request *)SE_REQ_BASE;
+	mm_reg_t                            tx  = se_boot_tx_base();
+	mm_reg_t                            rx  = se_boot_rx_base();
+	int                                 ret;
+
+	/* Same gating as alif_se_boot_cpu() -- see its comments above for why
+	 * each step exists. Builds the 16-byte control-CPU struct instead of
+	 * the 20-byte boot-CPU one -- see struct alif_se_control_svc_request's
+	 * comment above for why RESET_CPU/RELEASE_CPU carry no address. */
+	k_mutex_lock(&se_boot_lock, K_FOREVER);
+
+	if (sys_read32(tx + SE_MHU_TX_CH0_STAT) != 0U) {
+		LOG_ERR("SE-service TX channel busy (unacked prior request)");
+		k_mutex_unlock(&se_boot_lock);
+		return -EBUSY;
+	}
+
+	ret = se_heartbeat_wait(tx, rx);
+	if (ret != 0) {
+		LOG_ERR("SE never woke for its readiness heartbeat (%d) -- RESET_CPU(cpu_id=%u) "
+			"NOT sent",
+			ret, cpu_id);
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	req->header.service_id    = ALIF_SE_SVC_RESET_CPU;
+	req->header.flags         = 0U;
+	req->header.error_code    = 0U;
+	req->header.reserved      = 0U;
+	req->body.send_cpu_id     = cpu_id;
+	req->body.resp_error_code = 0U;
+
+	ret = se_transport_transact(tx, rx);
+	if (ret != 0) {
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	if (req->header.error_code != 0U) {
+		LOG_ERR("SE transport-layer error_code=%u for RESET_CPU(cpu_id=%u)",
+			req->header.error_code, cpu_id);
+	}
+	if (req->body.resp_error_code != 0U) {
+		LOG_ERR("SE service error resp_error_code=%u for RESET_CPU(cpu_id=%u)",
+			req->body.resp_error_code, cpu_id);
+	}
+
+	if (req->header.error_code == 0U && req->body.resp_error_code == 0U) {
+		LOG_INF("SE RESET_CPU(cpu_id=%u) succeeded (global VTOR transferred to the core's "
+			"internal VTOR)",
+			cpu_id);
+		k_mutex_unlock(&se_boot_lock);
+		return 0;
+	}
+
+	k_mutex_unlock(&se_boot_lock);
+
+	return (req->body.resp_error_code != 0U)
+		       ? se_clamp_positive_error(req->body.resp_error_code)
+		       : se_clamp_positive_error(req->header.error_code);
+}
+
+int alif_se_release_cpu(uint32_t cpu_id)
+{
+	struct alif_se_control_svc_request *req = (struct alif_se_control_svc_request *)SE_REQ_BASE;
+	mm_reg_t                            tx  = se_boot_tx_base();
+	mm_reg_t                            rx  = se_boot_rx_base();
+	int                                 ret;
+
+	/* Same gating and 16-byte control-CPU struct as alif_se_reset_cpu()
+	 * above -- see its comments for why each step exists. */
+	k_mutex_lock(&se_boot_lock, K_FOREVER);
+
+	if (sys_read32(tx + SE_MHU_TX_CH0_STAT) != 0U) {
+		LOG_ERR("SE-service TX channel busy (unacked prior request)");
+		k_mutex_unlock(&se_boot_lock);
+		return -EBUSY;
+	}
+
+	ret = se_heartbeat_wait(tx, rx);
+	if (ret != 0) {
+		LOG_ERR("SE never woke for its readiness heartbeat (%d) -- RELEASE_CPU(cpu_id=%u) "
+			"NOT sent",
+			ret, cpu_id);
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	req->header.service_id    = ALIF_SE_SVC_RELEASE_CPU;
+	req->header.flags         = 0U;
+	req->header.error_code    = 0U;
+	req->header.reserved      = 0U;
+	req->body.send_cpu_id     = cpu_id;
+	req->body.resp_error_code = 0U;
+
+	ret = se_transport_transact(tx, rx);
+	if (ret != 0) {
+		k_mutex_unlock(&se_boot_lock);
+		return ret;
+	}
+
+	if (req->header.error_code != 0U) {
+		LOG_ERR("SE transport-layer error_code=%u for RELEASE_CPU(cpu_id=%u)",
+			req->header.error_code, cpu_id);
+	}
+	if (req->body.resp_error_code != 0U) {
+		LOG_ERR("SE service error resp_error_code=%u for RELEASE_CPU(cpu_id=%u)",
+			req->body.resp_error_code, cpu_id);
+	}
+
+	if (req->header.error_code == 0U && req->body.resp_error_code == 0U) {
+		LOG_INF("SE RELEASE_CPU(cpu_id=%u) succeeded", cpu_id);
 		k_mutex_unlock(&se_boot_lock);
 		return 0;
 	}
@@ -651,27 +1022,40 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr)
 	int ret;
 
 	/*
-	 * HYPOTHESIS, UNVERIFIED ON SILICON -- see this function's doc comment
-	 * in include/alif_se_boot.h: SET_VTOR before BOOT_CPU, derived from
-	 * the service enum ordering and the VTOR==0 bench lockup, not from a
-	 * confirmed-working sequence. SERVICE_BOOT_RELEASE_CPU (502) is an
-	 * untried alternative to the BOOT_CPU step below.
+	 * SET_VTOR -> RESET_CPU -> RELEASE_CPU, per Alif's own DFP
+	 * documentation of what each service does (see this function's doc
+	 * comment in include/alif_se_boot.h for the full account) -- not the
+	 * SET_VTOR-then-BOOT_CPU enum-ordering guess an earlier revision of
+	 * this function used, which is what a bench run caught: BOOT_CPU never
+	 * transfers the global VTOR SET_VTOR staged into the released core's
+	 * own internal VTOR, only RESET_CPU does that.
 	 */
 	ret = alif_se_set_vtor(cpu_id, entry_addr);
 	if (ret != 0) {
-		LOG_ERR("alif_se_start_cpu(cpu_id=%u): SET_VTOR step failed (%d) -- BOOT_CPU step "
-			"NOT attempted",
+		LOG_ERR("alif_se_start_cpu(cpu_id=%u): SET_VTOR step failed (%d) -- RESET_CPU/"
+			"RELEASE_CPU steps NOT attempted",
 			cpu_id, ret);
 		return ret;
 	}
 	LOG_INF("alif_se_start_cpu(cpu_id=%u): SET_VTOR step succeeded", cpu_id);
 
-	ret = alif_se_boot_cpu(cpu_id, entry_addr);
+	ret = alif_se_reset_cpu(cpu_id);
 	if (ret != 0) {
-		LOG_ERR("alif_se_start_cpu(cpu_id=%u): BOOT_CPU step failed (%d)", cpu_id, ret);
+		LOG_ERR("alif_se_start_cpu(cpu_id=%u): RESET_CPU step failed (%d) -- RELEASE_CPU "
+			"step NOT attempted",
+			cpu_id, ret);
 		return ret;
 	}
-	LOG_INF("alif_se_start_cpu(cpu_id=%u): BOOT_CPU step succeeded", cpu_id);
+	LOG_INF("alif_se_start_cpu(cpu_id=%u): RESET_CPU step succeeded (global VTOR transferred "
+		"to the core's internal VTOR)",
+		cpu_id);
+
+	ret = alif_se_release_cpu(cpu_id);
+	if (ret != 0) {
+		LOG_ERR("alif_se_start_cpu(cpu_id=%u): RELEASE_CPU step failed (%d)", cpu_id, ret);
+		return ret;
+	}
+	LOG_INF("alif_se_start_cpu(cpu_id=%u): RELEASE_CPU step succeeded", cpu_id);
 
 	return 0;
 }

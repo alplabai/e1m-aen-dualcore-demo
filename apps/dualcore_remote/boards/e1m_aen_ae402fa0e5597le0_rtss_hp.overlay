@@ -3,14 +3,22 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * dualcore_he overlay for e1m_aen/ae402fa0e5597le0/rtss_he.
+ * dualcore_remote overlay for e1m_aen/ae402fa0e5597le0/rtss_hp.
+ *
+ * NOT BENCH-PROVEN on this SoC. The E1M-AEN401 / ae402fa0e5597le0 (Alif
+ * Ensemble E4) resident ATOC's boot-cluster choice has never been observed
+ * -- unlike ae822fa0e5597ls0 (E8), where the bench-resident ATOC is known to
+ * release M55-HP as the remote (see docs/BENCH-DUALCORE.md section 0). This
+ * overlay exists so BOTH the remote->rtss_hp and remote->rtss_he mappings
+ * stay buildable for this SoC; do not assume either one matches this part's
+ * actual boot order without checking a real E4 unit first.
  *
  * mhu_tx / mhu_rx: the Alif MHUv2 mailbox pair this cluster uses to signal
- * the rtss_hp cluster. Each M55 core sees its own TX/RX frame at the SAME
+ * its peer cluster. Each M55 core sees its own TX/RX frame at the SAME
  * register addresses (0x400B0000 / 0x400A0000) -- that is why this overlay
  * is byte-for-byte identical to the ae822fa0e5597ls0 one and to the mhu
- * nodes in dualcore_hp's overlays; only the ipc0 "role" property differs
- * between REMOTE (here) and HOST (dualcore_hp).
+ * nodes in dualcore_host's overlays; only the ipc0 "role" property differs
+ * between REMOTE (here) and HOST (dualcore_host).
  *
  * interrupts = <43 3> on mhu_rx: GIC IRQ 43 / priority 3 for this MHUv2 RX
  * frame. Not re-derived here -- carried over verbatim from the canonical
@@ -39,11 +47,12 @@
 	};
 
 	/*
-	 * role = "remote": this is the rtss_he (secondary) side of the RPMsg
-	 * link. The dualcore_hp overlays set role = "host" for the matching
-	 * ipc0 node on rtss_hp. memory-region points at the sram_ipc0
-	 * carve-out declared once in the board .dts (shared, non-cacheable
-	 * SRAM0) -- same physical region both cores' overlays reference.
+	 * role = "remote": this cluster is the RPMsg link's remote regardless
+	 * of which physical M55 cluster it is built for. dualcore_host's
+	 * overlays set role = "host" for the matching ipc0 node on the peer
+	 * cluster. memory-region points at the sram_ipc0 carve-out declared
+	 * once in the board .dts (shared, non-cacheable SRAM0) -- same physical
+	 * region both cores' overlays reference.
 	 */
 	ipc0: ipc0 {
 		compatible = "zephyr,ipc-openamp-static-vrings";
