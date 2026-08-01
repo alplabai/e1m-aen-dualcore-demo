@@ -471,12 +471,12 @@ static void se_mhu_id_probe_thread_entry(void *p1, void *p2, void *p3)
  * ATOC entry name for the CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY path
  * (../Kconfig) -- the argument to alif_se_process_toc_entry(). A literal
  * here, not a Kconfig string, because there is exactly one such entry in
- * this repo's dual-core ATOC shape today (see e.g.
- * /home/caner/alif-setools/app-release-exec-linux/build/config/aen-dc-hostB-two-entry.json's
- * "ALP-HP" entry, cpu_id M55_HP, loadAddress 0x50000000 -- the same peer this
- * app's default CONFIG_DEMO_RELEASE_PEER_CPU_ID/CONFIG_DEMO_RELEASE_PEER_ENTRY
- * defaults already name) -- see ../Kconfig's DEMO_RELEASE_VIA_TOC_ENTRY help
- * text for why this is a #define instead.
+ * this repo's dual-core ATOC shape today (see the two-entry ATOC config
+ * produced by the Alif SE tools' app-release-exec build config for this
+ * demo's "ALP-HP" entry, cpu_id M55_HP, loadAddress 0x50000000 -- the same
+ * peer this app's default CONFIG_DEMO_RELEASE_PEER_CPU_ID/
+ * CONFIG_DEMO_RELEASE_PEER_ENTRY defaults already name) -- see ../Kconfig's
+ * DEMO_RELEASE_VIA_TOC_ENTRY help text for why this is a #define instead.
  */
 #define DEMO_RELEASE_TOC_ENTRY_ID "ALP-HP"
 
@@ -531,14 +531,34 @@ struct ping_pong_msg {
 };
 
 static K_SEM_DEFINE(bound_sem, 0, 1);
-static K_SEM_DEFINE(pong_sem, 0, 1);
 
-/* Written by ep_recv() (RPMsg backend's callback context), read by main()
- * only after pong_sem has been given -- the semaphore is what makes that
- * handoff safe, not any lock on these two globals.
+/* One completed PONG: the message itself plus the cycle count captured at
+ * its arrival. Handed from ep_recv() (RPMsg backend's callback context) to
+ * main() through pong_msgq below -- NOT through a pair of plain globals plus
+ * a binary semaphore the way this used to work. A semaphore only serializes
+ * the WAKEUP; it does nothing to stop a SECOND PONG's callback from
+ * overwriting a shared global while main() is still in the middle of reading
+ * the FIRST one out of it -- main() only takes the semaphore, it never holds
+ * any lock the callback also respects, so that race is real, not
+ * theoretical, on a link where the peer can echo faster than main() drains
+ * pong_sem. k_msgq_put()/k_msgq_get() copy the whole struct pong_result by
+ * value into/out of the queue's own ring buffer, so each side always has its
+ * own private copy and a fast producer can never corrupt what a slower
+ * consumer is still using.
  */
-static struct ping_pong_msg pong_msg;
-static uint32_t             pong_cycles;
+struct pong_result {
+	struct ping_pong_msg msg;
+	uint32_t             cycles;
+};
+
+/* Capacity 1: this demo only ever cares about the MOST RECENT PONG, matching
+ * the previous binary-semaphore handoff's semantics -- see ep_recv() below
+ * for how a still-full queue (main() fell behind) is purged before the
+ * newest result is queued, rather than the newest result being silently
+ * dropped. Alignment 4 matches struct pong_result's own natural alignment
+ * (its widest member is a uint32_t).
+ */
+K_MSGQ_DEFINE(pong_msgq, sizeof(struct pong_result), 1, 4);
 
 static void ep_bound(void *priv)
 {
@@ -548,21 +568,38 @@ static void ep_bound(void *priv)
 
 static void ep_recv(const void *data, size_t len, void *priv)
 {
+	struct pong_result result;
+
 	ARG_UNUSED(priv);
 
-	/* Capture the receive timestamp as close to arrival as possible, for
-	 * an RTT measurement that isn't skewed by scheduler latency on the
-	 * k_sem_take() side in main().
-	 */
-	pong_cycles = k_cycle_get_32();
-
-	if (len != sizeof(pong_msg)) {
-		LOG_ERR("PONG has unexpected length %zu (expected %zu); dropping", len, sizeof(pong_msg));
+	if (len != sizeof(result.msg)) {
+		LOG_ERR("PONG has unexpected length %zu (expected %zu); dropping", len,
+			sizeof(result.msg));
 		return;
 	}
 
-	memcpy(&pong_msg, data, sizeof(pong_msg));
-	k_sem_give(&pong_sem);
+	/* Timestamp taken AFTER the length check, not before: capturing it
+	 * first would let a malformed message clobber the round-trip
+	 * timestamp of the NEXT valid PONG, since this function returns here
+	 * without ever queuing an entry for a message that fails the check --
+	 * an early timestamp write is not undone just because the rest of the
+	 * message was garbage.
+	 */
+	result.cycles = k_cycle_get_32();
+	memcpy(&result.msg, data, sizeof(result.msg));
+
+	/* K_NO_WAIT: this callback runs on the RPMsg backend's own context
+	 * and must never block. If the queue is still full (main() has not
+	 * drained the previous PONG yet), purge it first so this newer result
+	 * always wins instead of being silently dropped by a failing
+	 * k_msgq_put() on a full queue -- k_msgq_purge() cannot fail on a
+	 * queue with no waiting receivers, so the retry below is guaranteed
+	 * to succeed.
+	 */
+	if (k_msgq_put(&pong_msgq, &result, K_NO_WAIT) != 0) {
+		k_msgq_purge(&pong_msgq);
+		(void)k_msgq_put(&pong_msgq, &result, K_NO_WAIT);
+	}
 }
 
 static struct ipc_ept_cfg ep_cfg = {
@@ -574,8 +611,18 @@ static struct ipc_ept_cfg ep_cfg = {
         },
 };
 
+#ifdef CONFIG_DEMO_EXECUTION_BREADCRUMB
 /*
- * --- Pre-release ITCM-placement probe --------------------------------------
+ * --- Pre-release ITCM-placement probe (bench diagnostic, NOT shipped) ------
+ *
+ * Off by default (CONFIG_DEMO_EXECUTION_BREADCRUMB, see ../Kconfig) --
+ * enabled only with `-DEXTRA_CONF_FILE=breadcrumb.conf` (../breadcrumb.conf),
+ * the same opt-in shape every other bench-diagnostic probe in this file
+ * uses. This probe deliberately reads a possibly-unmapped address
+ * (CONFIG_DEMO_RELEASE_PEER_ENTRY, before the peer core is released), so it
+ * has no business running in the shipped default image -- the shipped image
+ * carries none of this, same as the execution breadcrumbs and the SE-MHU
+ * identity probe above.
  *
  * alif_se_boot_cpu()'s own doc (modules/alif-se-boot/include/alif_se_boot.h)
  * says the call does NOT place any code at the peer's entry address -- the
@@ -630,25 +677,36 @@ static uint32_t       itcm_probe_words[ITCM_PROBE_WORD_COUNT];
 /*
  * Overrides Zephyr's weak k_sys_fatal_error_handler() (zephyr/kernel/fatal.c)
  * for THIS WHOLE IMAGE -- there is only one such hook per image, it is not
- * scoped to the probe below. The default implementation calls
- * arch_system_halt() and never returns, which would spin this core forever
- * on a probe fault -- indistinguishable from the SE-boot hang this probe
- * exists to rule out. Per k_sys_fatal_error_handler()'s own documented
- * contract (zephyr/include/zephyr/fatal.h): "If this function returns, then
- * the currently executing thread will be aborted" -- i.e. z_fatal_error()
- * falls through to k_thread_abort() on whichever thread faulted, instead of
- * halting the system. Because the probe read runs in its own disposable
- * itcm_probe_thread rather than main()'s thread, a fault there tears down
- * only that thread; main() is unaffected and finds out via
- * itcm_probe_done_sem's bounded wait below, not via this handler. A fault
- * anywhere else in this image now gets the same "log and abort the faulting
- * thread" policy instead of a silent halt -- an acceptable, and arguably
- * better, general fallback for a demo that would otherwise vanish with no
- * diagnostic on any unrelated fault.
+ * scoped to the probe below -- but ONLY when CONFIG_DEMO_EXECUTION_BREADCRUMB
+ * is on: this whole function is compiled inside that option's #ifdef, same as
+ * the two probes it exists for. A build WITHOUT this option gets Zephyr's
+ * normal default behaviour (arch_system_halt() on any fatal error) --
+ * downgrading every fatal fault image-wide to "log and abort the faulting
+ * thread" is a bench-diagnostic accommodation for these two deliberately
+ * fault-prone probes, not something the shipped default image should carry.
+ * The default implementation calls arch_system_halt() and never returns,
+ * which would spin this core forever on a probe fault -- indistinguishable
+ * from the SE-boot hang these probes exist to rule out. Per
+ * k_sys_fatal_error_handler()'s own documented contract
+ * (zephyr/include/zephyr/fatal.h): "If this function returns, then the
+ * currently executing thread will be aborted" -- i.e. z_fatal_error() falls
+ * through to k_thread_abort() on whichever thread faulted, instead of halting
+ * the system. Because each probe read runs in its own disposable thread
+ * (itcm_probe_thread / se_mhu_id_probe_thread) rather than main()'s thread, a
+ * fault there tears down only that thread; main() is unaffected and finds out
+ * via that probe's own bounded semaphore wait, not via this handler.
  *
- * This same override also covers se_mhu_id_probe_thread_entry() (see the
- * top-of-file "SE-MHU identity probe" section) when
- * CONFIG_DEMO_EXECUTION_BREADCRUMB is on -- there is still only one
+ * Because a fault ANYWHERE in this image (not just in the two probe threads)
+ * now gets this same "log and abort the faulting thread" policy while this
+ * option is on, the log line below reports which thread actually faulted --
+ * via k_current_get()/k_thread_name_get() -- rather than assuming it was one
+ * of the two bench probes. main() itself can fault too (e.g. in the RPMsg
+ * path below), and asserting "a bench-diagnostic probe thread ... main()
+ * continues" in that case would be actively misleading.
+ *
+ * This same override covers se_mhu_id_probe_thread_entry() (see the
+ * top-of-file "SE-MHU identity probe" section) as well as
+ * itcm_probe_thread_entry() below -- there is still only one
  * k_sys_fatal_error_handler() per image, and both bench-diagnostic probes
  * share it deliberately: whichever of the two disposable threads faults,
  * only that thread is aborted, and any breadcrumb slot the faulting probe
@@ -656,12 +714,14 @@ static uint32_t       itcm_probe_words[ITCM_PROBE_WORD_COUNT];
  */
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
+	k_tid_t     faulting_thread = k_current_get();
+	const char *thread_name     = k_thread_name_get(faulting_thread);
+
 	ARG_UNUSED(esf);
-	LOG_ERR("CPU exception (reason=%u) in a bench-diagnostic probe thread (pre-release "
-	        "ITCM probe at 0x%08x, or -- if CONFIG_DEMO_EXECUTION_BREADCRUMB is on -- the "
-	        "SE-MHU identity probe) -- that address was not readable from this core at "
-	        "this point in boot; only the faulting thread is aborted, main() continues",
-	        reason, CONFIG_DEMO_RELEASE_PEER_ENTRY);
+	LOG_ERR("CPU exception (reason=%u) in thread %p (\"%s\") -- only this thread is "
+	        "aborted; every other thread, including main() if it is not the one that "
+	        "faulted, continues",
+	        reason, (void *)faulting_thread, thread_name != NULL ? thread_name : "<unnamed>");
 }
 
 static void itcm_probe_thread_entry(void *p1, void *p2, void *p3)
@@ -682,6 +742,7 @@ static void itcm_probe_thread_entry(void *p1, void *p2, void *p3)
 	itcm_probe_ok = true;
 	k_sem_give(&itcm_probe_done_sem);
 }
+#endif /* CONFIG_DEMO_EXECUTION_BREADCRUMB */
 
 int main(void)
 {
@@ -771,12 +832,17 @@ int main(void)
 	 * alif_se_start_cpu() call.
 	 */
 
+#ifdef CONFIG_DEMO_EXECUTION_BREADCRUMB
 	/*
 	 * Pre-release SES-placement probe -- see the top-of-file comment above
 	 * itcm_probe_thread_entry() for why this exists and why it runs in its
 	 * own thread. Fire it, wait for a result with a bound (so a fault or a
 	 * genuinely stuck read can never hang this thread), then log whichever
-	 * outcome happened before moving on to the release call itself.
+	 * outcome happened before moving on to the release call itself. Gated
+	 * behind CONFIG_DEMO_EXECUTION_BREADCRUMB -- see that section's own
+	 * top-of-file comment -- because it deliberately reads a
+	 * possibly-unmapped address before the peer core is released, which is
+	 * bench scaffolding, not something the shipped default image should do.
 	 */
 	itcm_probe_ok = false;
 	k_thread_create(&itcm_probe_thread, itcm_probe_stack, K_THREAD_STACK_SIZEOF(itcm_probe_stack),
@@ -799,6 +865,7 @@ int main(void)
 	/* else: itcm_probe_ok stayed false because the read faulted --
 	 * k_sys_fatal_error_handler() above already logged that outcome.
 	 */
+#endif /* CONFIG_DEMO_EXECUTION_BREADCRUMB */
 
 #ifdef CONFIG_DEMO_EXECUTION_BREADCRUMB
 	/* Second breadcrumb -- see the top-of-file comment above
@@ -967,6 +1034,7 @@ int main(void)
 
 	for (;;) {
 		struct ping_pong_msg ping = { .seq = seq };
+		struct pong_result   pong;
 		uint32_t             send_cycles;
 		uint32_t             rtt_us;
 
@@ -989,7 +1057,7 @@ int main(void)
 		 * trip between two M55s on the same die is microseconds, not
 		 * milliseconds.
 		 */
-		if (k_sem_take(&pong_sem, K_MSEC(PING_PERIOD_MS * 2)) != 0) {
+		if (k_msgq_get(&pong_msgq, &pong, K_MSEC(PING_PERIOD_MS * 2)) != 0) {
 			LOG_ERR("no PONG for seq=%u within %d ms -- dropping it and "
 			        "continuing with the next sequence number",
 			        seq, PING_PERIOD_MS * 2);
@@ -998,12 +1066,12 @@ int main(void)
 			continue;
 		}
 
-		if (pong_msg.seq != seq) {
-			LOG_WRN("PONG seq mismatch: sent %u, got %u", seq, pong_msg.seq);
+		if (pong.msg.seq != seq) {
+			LOG_WRN("PONG seq mismatch: sent %u, got %u", seq, pong.msg.seq);
 		}
 
-		rtt_us = k_cyc_to_us_floor32((uint32_t)(pong_cycles - send_cycles));
-		LOG_INF("PONG seq=%u rtt=%u us", pong_msg.seq, rtt_us);
+		rtt_us = k_cyc_to_us_floor32((uint32_t)(pong.cycles - send_cycles));
+		LOG_INF("PONG seq=%u rtt=%u us", pong.msg.seq, rtt_us);
 
 		seq++;
 		k_msleep(PING_PERIOD_MS);

@@ -358,19 +358,57 @@ static inline mm_reg_t se_boot_tx_base(void)
  * The request/response structure lives at the base of this node's
  * `memory-region` carve-out (see the DT binding: a small SRAM0 slice that is
  * ALREADY at the same address from every bus master -- no local-to-global
- * address translation is needed, unlike a TCM-resident buffer). It is NOT
- * MPU-NOCACHE on this build -- see se_transport_transact()'s flush/invalidate
- * comments for the verified detail -- so it is maintained by hand like any
- * other cached buffer shared with the SE. Its size (20 bytes) is asserted
- * against the carve-out's DT `reg` size at build time below, so a too-small
- * overlay carve-out fails the build instead of silently corrupting an SRAM
- * neighbour.
+ * address translation is needed, unlike a TCM-resident buffer). This carve-out
+ * IS MPU-NOCACHE on this build -- see se_transport_transact()'s flush/
+ * invalidate comments for the full verification -- so the flush/invalidate
+ * calls around it are defensive, not load-bearing. Its size (20 bytes) is
+ * asserted against the carve-out's DT `reg` size at build time below, so a
+ * too-small overlay carve-out fails the build instead of silently corrupting
+ * an SRAM neighbour. Its alignment (32 bytes, the D-cache line size on this
+ * target) is asserted right after, so sys_cache_data_invd_range()'s
+ * line-rounding (see se_transport_transact()) can never reach into the
+ * preceding line.
  */
 #define SE_REQ_BASE DT_REG_ADDR(DT_INST_PHANDLE(0, memory_region))
 
 BUILD_ASSERT(DT_REG_SIZE(DT_INST_PHANDLE(0, memory_region)) >=
 		     sizeof(struct alif_se_boot_svc_request),
 	     "alplab,e8-se-boot memory-region carve-out is smaller than the SE request struct");
+
+/*
+ * MINOR 4 follow-up: alignment, not just size. sys_cache_data_invd_range()
+ * (used below) reaches SCB_InvalidateDCache_by_Addr(), which rounds its base
+ * address DOWN to the enclosing 32-byte D-cache line before invalidating --
+ * an unaligned SE_REQ_BASE would therefore invalidate the tail of whatever
+ * line precedes the carve-out too. 0x02020000 happens to satisfy this today
+ * (it is 4096-byte aligned), but nothing before this assert enforced it, so a
+ * future DT edit that moves the carve-out to an odd offset would silently
+ * regress this.
+ */
+BUILD_ASSERT((SE_REQ_BASE % 32U) == 0U,
+	     "alplab,e8-se-boot memory-region carve-out must be 32-byte aligned "
+	     "(D-cache line size) so sys_cache_data_invd_range() cannot reach into the preceding line");
+
+/*
+ * MINOR 4 follow-up: the flush/invalidate calls in se_transport_transact()
+ * are both hardcoded to sizeof(struct alif_se_boot_svc_request) (20 bytes),
+ * the largest of the three wire structs built at SE_REQ_BASE
+ * (struct alif_se_boot_svc_request itself, 20 bytes; struct
+ * alif_se_control_svc_request, 16 bytes; struct alif_se_toc_entry_svc_request,
+ * 20 bytes). That single hardcoded size covers all three only because none of
+ * them is currently LARGER than alif_se_boot_svc_request -- an accident of
+ * today's protocol, not something the code enforces. Assert it so a future,
+ * larger wire struct fails the build instead of getting only a partial
+ * cache-maintenance range applied to it at runtime.
+ */
+BUILD_ASSERT(sizeof(struct alif_se_control_svc_request) <=
+		     sizeof(struct alif_se_boot_svc_request),
+	     "alif_se_control_svc_request must not exceed alif_se_boot_svc_request "
+	     "(se_transport_transact()'s cache maintenance is sized off the latter)");
+BUILD_ASSERT(sizeof(struct alif_se_toc_entry_svc_request) <=
+		     sizeof(struct alif_se_boot_svc_request),
+	     "alif_se_toc_entry_svc_request must not exceed alif_se_boot_svc_request "
+	     "(se_transport_transact()'s cache maintenance is sized off the latter)");
 
 /*
  * MINOR 7: clamp a raw SE-reported error to a positive `int` instead of
@@ -445,35 +483,46 @@ static int se_transport_transact(mm_reg_t tx, mm_reg_t rx)
 	 *     inside a `zephyr,memory-region` carve-out -- see the DT binding).
 	 *     (2) Flush it out of the D-cache before ringing the SE's doorbell.
 	 *
-	 * An earlier revision of this comment claimed the overlay's
-	 * `zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>` made this
-	 * carve-out non-cacheable, so no flush was needed. That claim was never
-	 * checked against the actual build and was WRONG: `zephyr,memory-attr`
-	 * only feeds Zephyr's mem-attr *lookup* API (`CONFIG_MEM_ATTR`) and the
-	 * linker script -- it does not by itself program an ARM MPU region.
-	 * Whether SE_REQ_BASE ends up non-cacheable depends entirely on whether
-	 * something *else* also covers it with an MPU NOCACHE attribute (either
-	 * the SoC's static `mpu_regions[]` table, or `CONFIG_NOCACHE_MEMORY`
-	 * wrapping the linker region in an MPU region Zephyr programs at boot).
-	 * Neither is true for this board's Kconfig: `CONFIG_NOCACHE_MEMORY` is
-	 * off, and the flashed image's own `mpu_config` table has exactly two
-	 * regions, `FLASH_0` and `SRAM_0` -- neither covers 0x02020000. So on
-	 * this build the carve-out sits under the ARMv8-M *default* memory map
-	 * with `CONFIG_DCACHE=y`, and must be flushed by hand before the SE
-	 * reads it, exactly as the vendor transport flushes its (cacheable TCM)
-	 * request buffer before send -- see
-	 * se_services/source/services_host_handler.c:225-226 in the Alif DFP
-	 * reference tree (`RTSS_CleanDCache_by_Addr()`), cited here as a FACT
-	 * about the vendor's own transport, not copied from it (see this file's
-	 * PROVENANCE header). Note this is *not* a full explanation of the
-	 * observed no-reply symptom on its own: the ARMv8-M default attributes
-	 * for this address range (Code region) are Normal, Write-Through --
-	 * under a genuinely write-through mapping a missing clean would not by
-	 * itself withhold a store from memory. What is established is narrower
-	 * and still sufficient reason to fix this: the prior comment's claim
-	 * that the buffer is MPU-NOCACHE was false, and doing the same
-	 * maintenance the vendor does is the correct, low-risk step regardless
-	 * of how much of the symptom it explains.
+	 * A prior revision of this comment claimed `zephyr,memory-attr =
+	 * <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>` on the overlay's carve-out does
+	 * NOT program an MPU region -- reasoning that CONFIG_MEM_ATTR only builds
+	 * a lookup API, so the buffer must be cached write-through. That claim was
+	 * checked against the actual Zephyr v4.4.0 source, this board's `.config`,
+	 * and the linked ELF, and it was WRONG on all three counts:
+	 *
+	 *   - arch/arm/core/mpu/arm_mpu.c:561-568 calls
+	 *     mpu_configure_regions_from_dt() right after the static
+	 *     `mpu_config` table is programmed, whenever CONFIG_MEM_ATTR is set --
+	 *     DT-declared memory-attr regions ARE programmed into the MPU, on top
+	 *     of (not instead of) the static table. `mpu_config.num_regions == 2`
+	 *     (FLASH_0, SRAM_0) says nothing about DT-sourced regions, which are
+	 *     indexed starting past it.
+	 *   - that function (arm_mpu.c:110) is declared `static`, so it carries no
+	 *     symbol in `nm` output -- its absence from the symbol table was
+	 *     misread as "never linked", when it is simply not externally visible.
+	 *     arm_mpu.c:129-131 maps this overlay's `ATTR_MPU_RAM_NOCACHE` tag to
+	 *     `REGION_RAM_NOCACHE_ATTR`.
+	 *   - subsys/mem_mgmt/Kconfig:4-6 defaults `CONFIG_MEM_ATTR` to y whenever
+	 *     `CONFIG_ARM_MPU` is set, and this board's built `.config` for
+	 *     e1m_aen/ae822fa0e5597ls0/rtss_he carries CONFIG_ARM_MPU=y,
+	 *     CONFIG_MEM_ATTR=y, CONFIG_DCACHE=y, CONFIG_DCACHE_LINE_SIZE=32.
+	 *   - decisive: the linked ELF's `mem_attr_region` table (symbol at
+	 *     803090e0) holds three 16-byte {name_ptr, addr, size, attr} entries;
+	 *     entry 2 is exactly this carve-out --
+	 *     addr=0x02020000 size=0x00001000 attr=0x00200000 (sram_se_req) --
+	 *     and attr=0x00200000 is DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE).
+	 *
+	 * So SE_REQ_BASE (0x02020000) IS MPU-NOCACHE at runtime, and this flush is
+	 * a no-op on a non-cacheable region today. It is kept anyway: it is
+	 * correct and cheap regardless of caching, and it stops being a no-op the
+	 * moment this carve-out is ever moved to a cached region or the DT
+	 * memory-attr tag is dropped, without anyone having to remember to add it
+	 * back. IMPORTANT: because the region is confirmed non-cacheable, this
+	 * flush/invalidate pair is NOT what explains the SE-transport -116 /
+	 * -ETIMEDOUT failure this module was originally written to chase -- that
+	 * failure's actual root cause is NOT established by anything in this file
+	 * and may still recur. Do not treat this cache maintenance as a fix for
+	 * it.
 	 */
 	sys_cache_data_flush_range((void *)SE_REQ_BASE, sizeof(struct alif_se_boot_svc_request));
 
@@ -546,24 +595,26 @@ static int se_transport_transact(mm_reg_t tx, mm_reg_t rx)
 	/*
 	 * (7) Invalidate the request/response buffer before the caller reads
 	 * any field the SE wrote back into it (resp_error_code, header.error_code).
-	 * Same correction as the comment on the way in above: this carve-out is
-	 * not MPU-NOCACHE on this build (no MPU region covers SE_REQ_BASE, see
-	 * the flush-side comment for the verified detail), so a stale, CLEAN
-	 * cache line here could hide the SE's write from this core's next read --
-	 * this region's default ARMv8-M attributes are Normal, Write-Through (see
-	 * the flush-side comment), so a line here is never dirty; the hazard is
-	 * this core's own cached copy of the response bytes, filled from an
-	 * earlier read of the same address before the SE's write happened, and a
-	 * plain load would return that stale clean data forever without this
-	 * invalidate. Under write-through the flush above is close to a no-op --
-	 * this invalidate is the half of the pair that plausibly explains the
-	 * observed -116; that is a diagnosis, not a proof, and the bench is what
-	 * settles it. Mirrors the vendor transport's post-reply
-	 * `RTSS_InvalidateDCache_by_Addr()` -- see
-	 * se_services/source/services_host_handler.c:248-249 in the Alif DFP
+	 * Same correction as the comment on the way in above (see
+	 * se_transport_transact()'s flush-side comment for the full three-way
+	 * verification): this carve-out IS MPU-NOCACHE on this build --
+	 * confirmed by Zephyr's own DT-driven MPU configuration and the linked
+	 * ELF's `mem_attr_region` table, entry 2 (addr=0x02020000
+	 * size=0x00001000 attr=0x00200000, matching DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))
+	 * -- so this invalidate is a no-op on today's build, kept for the same
+	 * defensive reason as the flush above: it costs nothing on a
+	 * non-cacheable region and stays correct if that ever changes. Mirrors
+	 * the vendor transport's post-reply `RTSS_InvalidateDCache_by_Addr()` --
+	 * see se_services/source/services_host_handler.c:248-249 in the Alif DFP
 	 * reference tree, cited as a fact about the vendor's own transport (see
 	 * this file's PROVENANCE header). The barrier below still orders the
 	 * RX-doorbell read above against the struct read the caller does next.
+	 *
+	 * IMPORTANT: because this region is confirmed non-cacheable, this
+	 * invalidate is NOT what explains the -116 / -ETIMEDOUT SE-transport
+	 * failure this module was originally written to chase. That failure's
+	 * root cause remains UNKNOWN -- see the flush-side comment above -- and
+	 * this maintenance pair should not be read as having fixed it.
 	 */
 	sys_cache_data_invd_range((void *)SE_REQ_BASE, sizeof(struct alif_se_boot_svc_request));
 	barrier_dmem_fence_full();
@@ -652,6 +703,28 @@ int alif_se_process_toc_entry(const char *image_id)
 	mm_reg_t                              tx  = se_boot_tx_base();
 	mm_reg_t                              rx  = se_boot_rx_base();
 	int                                   ret;
+
+	/*
+	 * Reject a NULL @p image_id outright (strncpy() below would fault on
+	 * it) and reject anything longer than ALIF_SE_TOC_ENTRY_ID_LEN (8)
+	 * bytes BEFORE it reaches strncpy(). Without this check, a caller
+	 * passing a name longer than the wire field silently gets the first 8
+	 * bytes copied and the rest dropped -- the SE then processes whatever
+	 * OTHER TOC entry happens to share that 8-byte prefix (or none at
+	 * all), not the one the caller asked for, with no error raised
+	 * anywhere in this call chain. Checked before the mutex/heartbeat so a
+	 * doomed call fails fast without waking the SE for nothing.
+	 */
+	if (image_id == NULL) {
+		LOG_ERR("alif_se_process_toc_entry(): image_id is NULL");
+		return -EINVAL;
+	}
+	if (strlen(image_id) > ALIF_SE_TOC_ENTRY_ID_LEN) {
+		LOG_ERR("alif_se_process_toc_entry(): image_id \"%s\" is longer than "
+			"ALIF_SE_TOC_ENTRY_ID_LEN (%u) bytes -- refusing to silently truncate it",
+			image_id, ALIF_SE_TOC_ENTRY_ID_LEN);
+		return -EINVAL;
+	}
 
 	/* Same gating as every other call in this file -- see
 	 * alif_se_boot_cpu()'s comments above for why each step exists. Routed
