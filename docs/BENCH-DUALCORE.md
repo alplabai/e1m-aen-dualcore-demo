@@ -277,6 +277,56 @@ established, and that failure may recur.** If `-116` (`-ETIMEDOUT`) from
 the SE transport shows up again, do not re-open the cache-attribute
 theory -- it is closed. Look elsewhere.
 
+The one link the ELF alone could not close was hardware: the `0x02020000`
+entry lands at MPU region index 4 (after the two static regions and the
+`0x1a000000` and `0x02010000` DT regions), so it needs `MPU_TYPE.DREGION`
+to be at least 5. The M55 MPU is configurable at 0/4/8/12/16 regions; at
+DREGION=4 that entry alone would fail to allocate and fall back to the
+ARMv8-M default map -- Code region `0x00000000`-`0x1FFFFFFF`, Normal
+write-through **cacheable** -- flipping the whole conclusion.
+
+**Measured on this bench (2026-08-01, read-only SWD, RTSS-HE core at
+AP `0x300000`, `DPIDR 0x4c013477`):**
+
+```
+MPU_TYPE  0xE000ED90 = 0x00001000    DREGION = 16
+MPU_CTRL  0xE000ED94 = 0x00000005    ENABLE=1, HFNMIENA=0, PRIVDEFENA=1
+MPU_MAIR0 0xE000EDC0 = 0x0044FFAA    Attr2 = 0x44 = NORMAL_OUTER_INNER_NON_CACHEABLE
+MPU_MAIR1 0xE000EDC4 = 0x00000000
+CPUID     0xE000ED00 = 0x411FD220    Cortex-M55 r1p0
+```
+
+`DREGION = 16` is the maximum of the configurable options, so region index
+4 has ample room and the feared failure mode does not exist on this
+silicon. `DREGION` is a pure hardware property, valid regardless of which
+image is resident. Attr2 = `0x44` also confirms Zephyr's ARMv8-M attribute
+table is the one loaded.
+
+**What that reading does NOT establish.** The image resident in MRAM slot0
+at the time was not one of ours -- `VTOR = 0x80010000`, reset handler
+`0x80013225` (the canonical `person_detect` slot0 is `0x80011F15`) -- and
+it programs only three regions: `0x80000000` (MRAM), `0x20000000` (DTCM),
+`0x1A000000` (device). It declares no `sram_se_req`, so indices 3-15 read
+`RBAR=0x00000000 RLAR=0x00000000` with `EN=0`. Note what follows for that
+image, since `PRIVDEFENA=1`: `0x02020000` is unmapped there and DOES fall
+through to the cacheable default map. That is what an image WITHOUT the
+devicetree carve-out looks like -- it is not what our build does.
+
+To confirm our own build programs region 4 as expected, flash it and
+re-run exactly these reads, then check for `RBAR` base `0x02020000` with
+`RLAR` limit `0x02020FFF` and `RLAR.AttrIndx = 2`. That step has not been
+performed.
+
+Reading these registers needs no flashing and no reset. Attach read-only
+over SWD, halt, then read `MPU_TYPE` at `0xE000ED90`, `MPU_CTRL` at
+`0xE000ED94`, `MPU_MAIR0`/`MPU_MAIR1` at `0xE000EDC0`/`0xE000EDC4`, then
+for each region index write the index to `MPU_RNR` at `0xE000ED98` and
+read `MPU_RBAR` at `0xE000ED9C` and `MPU_RLAR` at `0xE000EDA0`. Note that
+`0xE000ED90` is `MPU_TYPE` and is read-only -- `MPU_RNR` is `0xE000ED98`;
+confusing the two is easy and would be the session's only write. Use the
+RNR-then-RBAR/RLAR sequence, not the `MPU_RBAR_A1/A2/A3` aliases. Read
+every value twice in separate sessions and discard the run if they differ.
+
 ## 3. Bench-only alternative: debugger-placement path (2026-07-30 run; does not survive a power cycle)
 
 Everything in this section exists because, on 2026-07-30, this bench had no
