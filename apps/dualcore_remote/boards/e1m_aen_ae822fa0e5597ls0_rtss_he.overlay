@@ -3,14 +3,22 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * dualcore_he overlay for e1m_aen/ae822fa0e5597ls0/rtss_he.
+ * dualcore_remote overlay for e1m_aen/ae822fa0e5597ls0/rtss_he.
+ *
+ * NOT the bench-proven default on this SoC. The bench-resident ATOC on
+ * E1M-AEN801 boots M55-HE first and it runs the HOST role (see
+ * docs/BENCH-DUALCORE.md section 0), so the bench-proven remote mapping is
+ * ../e1m_aen_ae822fa0e5597ls0_rtss_hp.overlay, not this file. This overlay
+ * is kept buildable -- scripts/build-all.sh can still target
+ * remote->rtss_he explicitly -- but it is not what scripts/build-all.sh
+ * builds by default for this SoC.
  *
  * mhu_tx / mhu_rx: the Alif MHUv2 mailbox pair this cluster uses to signal
  * the rtss_hp cluster. Each M55 core sees its own TX/RX frame at the SAME
  * register addresses (0x400B0000 / 0x400A0000) -- that is why this overlay
  * is byte-for-byte identical to the ae402fa0e5597le0 one and to the mhu
- * nodes in dualcore_hp's overlays; only the ipc0 "role" property differs
- * between REMOTE (here) and HOST (dualcore_hp).
+ * nodes in dualcore_host's overlays; only the ipc0 "role" property differs
+ * between REMOTE (here) and HOST (dualcore_host).
  *
  * interrupts = <43 3> on mhu_rx: GIC IRQ 43 / priority 3 for this MHUv2 RX
  * frame. Not re-derived here -- carried over verbatim from the canonical
@@ -40,7 +48,7 @@
 
 	/*
 	 * role = "remote": this is the rtss_he (secondary) side of the RPMsg
-	 * link. The dualcore_hp overlays set role = "host" for the matching
+	 * link. The dualcore_host overlays set role = "host" for the matching
 	 * ipc0 node on rtss_hp. memory-region points at the sram_ipc0
 	 * carve-out declared once in the board .dts (shared, non-cacheable
 	 * SRAM0) -- same physical region both cores' overlays reference.

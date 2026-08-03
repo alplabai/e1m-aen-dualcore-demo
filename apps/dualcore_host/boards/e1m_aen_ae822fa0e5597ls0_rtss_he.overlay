@@ -1,0 +1,127 @@
+/*
+ * Copyright 2026 Alp Lab AB
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * dualcore_host overlay for e1m_aen/ae822fa0e5597ls0/rtss_he.
+ *
+ * BENCH-PROVEN DEFAULT for this SoC: the resident ATOC on the E1M-AEN801
+ * bench unit boots M55-HE (RTSS-HE) first and only that cluster has Secure
+ * Enclave access, so the RPMsg HOST -- the role that calls
+ * alif_se_boot_cpu() -- must run here, not on rtss_hp. See
+ * docs/BENCH-DUALCORE.md section 0 and scripts/build-all.sh's
+ * core_app_dir() for the same mapping applied at the build-script level.
+ *
+ * Node-for-node identical to this app's ../e1m_aen_ae822fa0e5597ls0_rtss_hp.overlay
+ * (and to the ae402fa0e5597le0 rtss_he overlay) -- every peripheral this
+ * overlay instantiates (mhu_tx/mhu_rx, the SE-service MHU frame pair,
+ * sram_se_req, se_boot) sits at the SAME register addresses regardless of
+ * which M55 cluster is running the image; only the DTCM size and console
+ * differ per cluster, and both come from the shared board .dts, not from
+ * this file.
+ *
+ * mhu_tx / mhu_rx: the Alif MHUv2 mailbox pair this cluster uses to signal
+ * its peer cluster (rtss_hp, running dualcore_remote on this bench mapping).
+ *
+ * interrupts = <43 3> on mhu_rx: GIC IRQ 43 / priority 3 for this MHUv2 RX
+ * frame. Not re-derived here -- carried over verbatim from the canonical
+ * hardware spec this project was built against; see modules/alif-mhuv2 for
+ * the driver that consumes it.
+ *
+ * se_boot / sram_se_req: the Alif Secure-Enclave BOOT_CPU service client
+ * (modules/alif-se-boot, CONFIG_ALIF_SE_BOOT) this cluster uses to release
+ * its peer at runtime, BEFORE opening ipc0 as host (see src/main.c). This
+ * node pair is HOST-only -- only the host app ever calls alif_se_boot_cpu(),
+ * so it does not belong in the shared board .dts nor in dualcore_remote's
+ * overlays. mhu@40040000 (rx, IRQ 37) / mhu@40050000 (tx, IRQ 38) are a
+ * SEPARATE MHUv2 frame pair from mhu_rx/mhu_tx above -- dedicated to
+ * SE-service traffic, never used for RPMsg doorbells. See
+ * modules/alif-se-boot/README.md for the sram_se_req address arithmetic (it
+ * abuts, and does not overlap, sram_ipc0 below).
+ *
+ * se_mhu_rx / se_mhu_tx: the dedicated SE-service MHUv2 frame pair, modeled
+ * as two separate nodes (like mhu_tx/mhu_rx above) rather than folded into
+ * se_boot itself, so each keeps its own address/IRQ in the generated
+ * zephyr.dts. Per the canonical hardware spec this pair carries an
+ * `interrupts` property on BOTH frames (37 rx, 38 tx) -- unlike mhu_tx
+ * above, which has none; that asymmetry is transcribed as given, not
+ * homogenized. Neither line is connected to the NVIC by the driver (it
+ * polls); see modules/alif-se-boot/dts/bindings for why they're still
+ * declared.
+ */
+
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+
+/ {
+	soc {
+		mhu_tx: mhu@400b0000 {
+			compatible = "alif,mhuv2-mbox";
+			reg = <0x400B0000 0x1000>;
+			alif,direction = "tx";
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+
+		mhu_rx: mhu@400a0000 {
+			compatible = "alif,mhuv2-mbox";
+			reg = <0x400A0000 0x1000>;
+			interrupts = <43 3>;
+			alif,direction = "rx";
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+
+		se_mhu_rx: mhu@40040000 {
+			compatible = "alplab,e8-se-mhu-frame";
+			reg = <0x40040000 0x1000>;
+			interrupts = <37 3>;
+			alplab,direction = "rx";
+			status = "okay";
+		};
+
+		se_mhu_tx: mhu@40050000 {
+			compatible = "alplab,e8-se-mhu-frame";
+			reg = <0x40050000 0x1000>;
+			interrupts = <38 3>;
+			alplab,direction = "tx";
+			status = "okay";
+		};
+
+		sram_se_req: memory@2020000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x02020000 0x1000>;
+			zephyr,memory-region = "SRAM_SE_REQ";
+			zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>;
+		};
+
+		se_boot: se-boot {
+			compatible = "alplab,e8-se-boot";
+			alplab,rx-mhu = <&se_mhu_rx>;
+			alplab,tx-mhu = <&se_mhu_tx>;
+			memory-region = <&sram_se_req>;
+			status = "okay";
+		};
+	};
+
+	/*
+	 * role = "host": this cluster is the RPMsg link's host regardless of
+	 * which physical M55 cluster it is built for -- see this app's
+	 * top-of-file comment. dualcore_remote's overlays set role = "remote"
+	 * for the matching ipc0 node on the peer cluster. memory-region points
+	 * at the sram_ipc0 carve-out declared once in the board .dts (shared,
+	 * non-cacheable SRAM0).
+	 */
+	ipc0: ipc0 {
+		compatible = "zephyr,ipc-openamp-static-vrings";
+		memory-region = <&sram_ipc0>;
+		mboxes = <&mhu_tx 0>, <&mhu_rx 0>;
+		mbox-names = "tx", "rx";
+		role = "host";
+		status = "okay";
+	};
+
+	chosen {
+		zephyr,ipc = &ipc0;
+		zephyr,ipc-shm = &sram_ipc0;
+	};
+};

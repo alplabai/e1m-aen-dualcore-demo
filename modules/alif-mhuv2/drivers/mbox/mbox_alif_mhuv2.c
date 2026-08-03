@@ -167,7 +167,7 @@ static int mhuv2_send(const struct device *dev, mbox_channel_id_t channel_id,
      * the TX frame, so without this the doorbell write does not propagate to the
      * receiver's CH0_STAT (bench-confirmed: rings sent but RX status stayed 0).
      * Matches the proven raw-MHU wake handshake used by this repo's
-     * apps/dualcore_hp <-> apps/dualcore_he pair.
+     * apps/dualcore_host <-> apps/dualcore_remote pair.
      */
     sys_write32(1U, cfg->base + MHUV2_TX_ACCESS_REQUEST);
     for (uint32_t i = 0U; i < MHUV2_ACCESS_READY_SPINS; i++) {

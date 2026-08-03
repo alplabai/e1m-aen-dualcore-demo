@@ -3,14 +3,23 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * dualcore_hp overlay for e1m_aen/ae822fa0e5597ls0/rtss_hp.
+ * dualcore_host overlay for e1m_aen/ae402fa0e5597le0/rtss_hp.
+ *
+ * NOT BENCH-PROVEN on this SoC (nor is host->rtss_he -- see the sibling
+ * ../e1m_aen_ae402fa0e5597le0_rtss_he.overlay). The E1M-AEN401 /
+ * ae402fa0e5597le0 (Alif Ensemble E4) resident ATOC's boot-cluster choice
+ * has never been observed on real silicon; both mappings are kept
+ * buildable for this SoC and neither is assumed to match ae822fa0e5597ls0's
+ * bench-observed host->rtss_he mapping. scripts/build-all.sh's default
+ * (host->rtss_he) is applied uniformly across both SoCs for simplicity, not
+ * because it has been confirmed here too.
  *
  * mhu_tx / mhu_rx: the Alif MHUv2 mailbox pair this cluster uses to signal
  * the rtss_he cluster. Each M55 core sees its own TX/RX frame at the SAME
  * register addresses (0x400B0000 / 0x400A0000) -- that is why this overlay
- * is byte-for-byte identical to the ae402fa0e5597le0 one and to the mhu
- * nodes in dualcore_he's overlays; only the ipc0 "role" property differs
- * between HOST (here) and REMOTE (dualcore_he).
+ * is byte-for-byte identical to the ae822fa0e5597ls0 one and to the mhu
+ * nodes in dualcore_remote's overlays; only the ipc0 "role" property differs
+ * between HOST (here) and REMOTE (dualcore_remote).
  *
  * interrupts = <43 3> on mhu_rx: GIC IRQ 43 / priority 3 for this MHUv2 RX
  * frame. Not re-derived here -- carried over verbatim from the canonical
@@ -19,10 +28,10 @@
  *
  * se_boot / sram_se_req: the Alif Secure-Enclave BOOT_CPU service client
  * (modules/alif-se-boot, CONFIG_ALIF_SE_BOOT) this cluster uses to release
- * rtss_he at runtime, BEFORE opening ipc0 as host (see src/main.c). This
- * node pair is deliberately HP-only -- only this cluster ever calls
+ * its peer cluster at runtime, BEFORE opening ipc0 as host (see src/main.c).
+ * This node pair is HOST-only -- only the host app ever calls
  * alif_se_boot_cpu(), so it does not belong in the shared board .dts nor in
- * apps/dualcore_he's overlays. mhu@40040000 (rx, IRQ 37) / mhu@40050000
+ * dualcore_remote's overlays. mhu@40040000 (rx, IRQ 37) / mhu@40050000
  * (tx, IRQ 38) are a SEPARATE MHUv2 frame pair from mhu_rx/mhu_tx above --
  * dedicated to SE-service traffic, never used for RPMsg doorbells. See
  * modules/alif-se-boot/README.md for the sram_se_req address arithmetic
@@ -94,7 +103,7 @@
 
 	/*
 	 * role = "host": this is the rtss_hp (primary) side of the RPMsg link.
-	 * The dualcore_he overlays set role = "remote" for the matching ipc0
+	 * The dualcore_remote overlays set role = "remote" for the matching ipc0
 	 * node on rtss_he. memory-region points at the sram_ipc0 carve-out
 	 * declared once in the board .dts (shared, non-cacheable SRAM0).
 	 */

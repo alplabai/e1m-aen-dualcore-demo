@@ -1,14 +1,19 @@
 # E1M-AEN dual-core (Cortex-M55 RTSS-HP + RTSS-HE) demo
 
-> **Proven on hardware.** A dual-core RPMsg ping/pong link between both
-> Cortex-M55 clusters ran on E1M-AEN801 silicon on 2026-07-30 (369
-> consecutive PONGs, no gaps). See
-> [`docs/BENCH-DUALCORE.md`](docs/BENCH-DUALCORE.md) for the exact,
-> ordered reproduction procedure -- it corrects an assumption the rest of
-> this README still makes in places (section 7 in particular): that
-> RTSS-HP always has SE access and boots second. On the bench that was
-> the other way around; `docs/BENCH-DUALCORE.md` section 0 explains the
-> mismatch.
+> **What is proven, and on what.** A dual-core RPMsg ping/pong link between
+> both Cortex-M55 clusters ran on **E1M-AEN801** (`ae822fa0e5597ls0`)
+> silicon on 2026-07-30: 369 consecutive PONGs, no gaps. That run used the
+> bench-proven role->core mapping this repo now builds by default -- HOST
+> on `rtss_he`, REMOTE on `rtss_hp` -- because the resident ATOC on that
+> bench unit boots M55-HE first and only that cluster has Secure Enclave
+> access. See [`docs/BENCH-DUALCORE.md`](docs/BENCH-DUALCORE.md) for the
+> full procedure, including section 0's explanation of why this is the
+> MIRROR of what the app names `dualcore_hp`/`dualcore_he` used to imply
+> (apps are now named `dualcore_host`/`dualcore_remote`, by role, for
+> exactly this reason), and its final section for exactly what is and is
+> not reproducible from this tree today. The E1M-AEN401 (`ae402fa0e5597le0`)
+> boot-cluster mapping has never been observed on real silicon -- do not
+> assume it matches E1M-AEN801's.
 
 ## 1. What this is
 
@@ -26,11 +31,19 @@ Each SoC carries two independent Cortex-M55 clusters:
 
 Both clusters boot their own Zephyr image out of the same on-chip MRAM and
 talk to each other over a shared-memory OpenAMP link, using an Alif MHUv2
-mailbox pair as the doorbell. Before the RTSS-HP cluster opens that link, it
-first asks the Alif Secure Enclave to release RTSS-HE from reset (see
-`modules/alif-se-boot/`) -- RTSS-HE has no SE access of its own, so it cannot
-release itself, and upstream Zephyr provides no other in-tree mechanism to
-bring it out of reset (section 7).
+mailbox pair as the doorbell. Before the RPMsg link opens, the **HOST**
+role (`apps/dualcore_host`) asks the Alif Secure Enclave to release its
+peer, the **REMOTE** role (`apps/dualcore_remote`), from reset (see
+`modules/alif-se-boot/`). Which physical cluster runs HOST is a
+per-silicon fact, not a repo convention: it is whichever cluster the
+resident ATOC boots first and so has Secure Enclave access -- on the
+E1M-AEN801 bench unit that is `rtss_he`, not `rtss_hp` (see
+`docs/BENCH-DUALCORE.md` section 0). Apps are named by role
+(`dualcore_host`/`dualcore_remote`), not by cluster, and each builds for
+both `rtss_hp` and `rtss_he` qualifiers so the mapping is a build-target
+choice, not a source change -- see section 6. Upstream Zephyr provides no
+in-tree mechanism to bring a peer cluster out of reset on its own (section
+7).
 
 ## 2. No alp-sdk dependency
 
@@ -46,8 +59,9 @@ target. It is built from four things only:
    underneath it.
 4. The out-of-tree Secure-Enclave BOOT_CPU client in `modules/alif-se-boot/`
    (this repo) -- authored from the SE service protocol, not from Alif's
-   `se_services` sources (see that module's README); HP-only, used by
-   `apps/dualcore_hp` to release RTSS-HE before opening the IPC link.
+   `se_services` sources (see that module's README); HOST-only, used by
+   `apps/dualcore_host` to release its REMOTE peer before opening the IPC
+   link.
 
 Nothing here reaches into an `alp-sdk-dev` checkout at build time. Alp Lab's
 own Apache-2.0 mailbox driver source was copied out of that repo by hand
@@ -117,51 +131,60 @@ and flashing one after the other silently destroys the first image.
 
 ## 6. Build commands
 
-Both cores are built as separate west application builds, each pointed at
+Both roles are built as separate west application builds, each pointed at
 this repo's out-of-tree board directory and module(s) via `-DBOARD_ROOT` and
 `-DZEPHYR_EXTRA_MODULES`. Substitute `<repo>` for the absolute path of this
 checkout and `<zephyr-base>` for your Zephyr v4.4.0 checkout.
 
-RTSS-HP (primary target, E1M-AEN401 / `ae402fa0e5597le0`) needs BOTH
-out-of-tree modules, semicolon-separated: `modules/alif-mhuv2` for the
-doorbell/RPMsg link, and `modules/alif-se-boot` (see section 1/2) because
-`apps/dualcore_hp/prj.conf` sets `CONFIG_ALIF_SE_BOOT=y` and the HP board
-overlay instantiates that module's `alplab,e8-se-boot` devicetree node --
-omitting it fails Kconfig with `attempt to assign the value 'y' to the
-undefined symbol ALIF_SE_BOOT`:
+Each app (`apps/dualcore_host`, `apps/dualcore_remote`) builds for BOTH the
+`rtss_hp` and `rtss_he` qualifiers of BOTH SoCs -- eight combinations total.
+The commands below are the bench-proven default on E1M-AEN801
+(`ae822fa0e5597ls0`): HOST on `rtss_he`, REMOTE on `rtss_hp` (see the banner
+above and `docs/BENCH-DUALCORE.md` section 0). The other qualifier for each
+app is equally buildable -- just swap `rtss_he`/`rtss_hp` in the `-b` and
+app-path arguments -- but is not this SoC's bench-confirmed mapping.
+
+HOST needs BOTH out-of-tree modules, semicolon-separated: `modules/alif-mhuv2`
+for the doorbell/RPMsg link, and `modules/alif-se-boot` (see section 1/2)
+because `apps/dualcore_host/prj.conf` sets `CONFIG_ALIF_SE_BOOT=y` and every
+board overlay in that app instantiates that module's `alplab,e8-se-boot`
+devicetree node -- omitting it fails Kconfig with `attempt to assign the
+value 'y' to the undefined symbol ALIF_SE_BOOT`:
 
 ```sh
 west build -p auto \
-  -b e1m_aen/ae402fa0e5597le0/rtss_hp \
-  -d build/ae402fa0e5597le0/rtss_hp \
-  <repo>/apps/dualcore_hp \
+  -b e1m_aen/ae822fa0e5597ls0/rtss_he \
+  -d build/ae822fa0e5597ls0/rtss_he \
+  <repo>/apps/dualcore_host \
   -- \
   -DBOARD_ROOT=<repo> \
   "-DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2;<repo>/modules/alif-se-boot"
 ```
 
-RTSS-HE (primary target, E1M-AEN401 / `ae402fa0e5597le0`):
+REMOTE needs only `modules/alif-mhuv2`:
 
 ```sh
 west build -p auto \
-  -b e1m_aen/ae402fa0e5597le0/rtss_he \
-  -d build/ae402fa0e5597le0/rtss_he \
-  <repo>/apps/dualcore_he \
+  -b e1m_aen/ae822fa0e5597ls0/rtss_hp \
+  -d build/ae822fa0e5597ls0/rtss_hp \
+  <repo>/apps/dualcore_remote \
   -- \
   -DBOARD_ROOT=<repo> \
   -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2
 ```
 
-For the E1M-AEN801 / `ae822fa0e5597ls0` bench silicon, swap the board string
-and app arguments accordingly (`e1m_aen/ae822fa0e5597ls0/rtss_hp` and
-`e1m_aen/ae822fa0e5597ls0/rtss_he`, same apps). `scripts/build-all.sh` runs
-all of the above for you:
+For the E1M-AEN401 / `ae402fa0e5597le0` SoC, swap the board string and app
+arguments accordingly -- its boot-cluster mapping is unconfirmed, so
+`scripts/build-all.sh` applies the same default (HOST on `rtss_he`, REMOTE
+on `rtss_hp`) to it for simplicity, not because it has been bench-checked
+there too. `scripts/build-all.sh` runs the default mapping for you and
+prints which qualifier it picked as HOST/REMOTE and why:
 
 ```sh
 export ZEPHYR_BASE=<zephyr-base>
-scripts/build-all.sh                 # E1M-AEN401 only (rtss_hp + rtss_he)
-scripts/build-all.sh ae822fa0e5597ls0  # E1M-AEN801 only
-scripts/build-all.sh all             # all four targets
+scripts/build-all.sh                 # E1M-AEN401 only (host->rtss_he, remote->rtss_hp)
+scripts/build-all.sh ae822fa0e5597ls0  # E1M-AEN801 only (bench-proven mapping)
+scripts/build-all.sh all             # all four board targets, both SoCs
 ```
 
 ## 7. Flashing and running
@@ -203,7 +226,11 @@ yet.
   `sram_ipc0` shared-memory carve-out (`0x02010000`, 64 KB) were validated
   against the **E1M-AEN801 (E8 / `AE822FA0E5597LS0`)** silicon actually on
   the bench. They are **unverified on E4 / E1M-AEN401** silicon.
-- **No hardware run has been performed by this project.** Everything above
-  reflects device-tree/Kconfig-level verification against upstream Zephyr
-  sources and the schematics/register documentation available at
-  authoring time, not a bench bring-up log.
+- **One hardware run has been performed by this project**, on E1M-AEN801
+  (E8 / `AE822FA0E5597LS0`) silicon, 2026-07-30 -- see the banner above and
+  `docs/BENCH-DUALCORE.md`. That run used a debugger-driven placement
+  procedure, not a standalone SETOOLS/ATOC boot; the SETOOLS/ATOC path
+  above remains unexercised, and E1M-AEN401 (E4) has had no hardware run
+  at all. Everything else above reflects device-tree/Kconfig-level
+  verification against upstream Zephyr sources and the schematics/register
+  documentation available at authoring time, not a bench bring-up log.

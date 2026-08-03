@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# App-level Kconfig for dualcore_remote. Presence of this file makes CMake's
+# kconfig.cmake use IT as KCONFIG_ROOT instead of $ZEPHYR_BASE/Kconfig (see
+# cmake/modules/kconfig.cmake in the Zephyr tree), so the trailing
+# `source "Kconfig.zephyr"` below is mandatory -- without it this app would
+# lose every upstream Kconfig option (LOG, IPC_SERVICE, MBOX, ...) that
+# prj.conf already turns on. This mirrors ../dualcore_host/Kconfig's own
+# comment for the identical reason.
+
+config DEMO_REMOTE_BEACON
+	bool "Write a liveness beacon to global SRAM0 (bench diagnostic)"
+	default n
+	help
+	  DIAGNOSTIC ONLY -- OFF by default, not part of the shipped image.
+	  Enable explicitly with `-DEXTRA_CONF_FILE=beacon.conf` (../beacon.conf),
+	  the same opt-in shape dualcore_host's breadcrumb.conf uses; do not flip
+	  this default instead.
+
+	  WHY THIS EXISTS: the host's own console (see ../dualcore_host/src/main.c)
+	  can prove it completed the SE core-release call, but has no way to prove
+	  whether the RELEASED core (this app) ever actually ran -- the two
+	  M55 clusters' local memories are not cross-readable from a debug-AP
+	  session attached to the other core. A "no PONG, endpoint never binds"
+	  symptom is consistent with at least three different failures (the
+	  remote never executed at all; it ran but hung before opening ipc0; it
+	  opened ipc0 fine but the RPMsg bind itself is broken, e.g. by cache
+	  incoherency on the shared vring memory) that all look identical from
+	  the host's side alone. This beacon is the observable that tells them
+	  apart, by writing to global SRAM0 -- memory reachable from EITHER
+	  core's debug-AP, unlike this core's own DTCM.
+
+	  When enabled, src/main.c writes six fixed 32-bit words to global SRAM0
+	  at 0x02000100-0x02000114 -- see the top-of-file comment above
+	  beacon_write() in src/main.c for exactly which word means what and why
+	  each address was picked. This range is deliberately DISJOINT from
+	  dualcore_host's own execution-breadcrumb block (0x02000000-0x02000038,
+	  see ../dualcore_host/Kconfig's CONFIG_DEMO_EXECUTION_BREADCRUMB) so a
+	  bench read of global SRAM0 can never confuse the two apps' diagnostics,
+	  even when both are enabled on the same silicon at once (host on one
+	  cluster, remote on the other, sharing the same physical SRAM0).
+
+source "Kconfig.zephyr"
