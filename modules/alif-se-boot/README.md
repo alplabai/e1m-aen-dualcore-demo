@@ -111,7 +111,12 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr);
   documented behaviour of `SERVICES_boot_reset_cpu()`: for an M55 core, this
   also transfers whatever value a prior `alif_se_set_vtor()` call wrote into
   the SE's Global VTOR register into that core's own internal VTOR register
-  -- the step a `alif_se_boot_cpu()`-only release skips.
+  -- the step a `alif_se_boot_cpu()`-only release skips. Alif documents this
+  transfer; it was NOT observed on `AE822FA0E5597LS0`, cpu_id 2 (M55_HP),
+  entry `0x50000000`, 2026-08-03 -- the only VTOR reading taken was
+  post-attach over SWD and is confounded by the debugger's own attach-time
+  state clearing, so it does not confirm the transfer happened, and does not
+  disprove it either. See `docs/BENCH-DUALCORE.md` section 3.7.
 - `alif_se_release_cpu()` -- SE service_id 502 (RELEASE_CPU). Same 16-byte
   wire struct as `alif_se_reset_cpu()`. This is the step that actually
   starts the core running.
@@ -121,8 +126,8 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr);
   `alif_se_boot_cpu()` used to couple heartbeat and BOOT_CPU inseparably,
   which once cost a bench run an unintended HP release during what was meant
   to be a pure reachability probe.
-- `alif_se_start_cpu()` -- the correct sequence to start a core at a
-  specific vector table base: `alif_se_set_vtor()`, then
+- `alif_se_start_cpu()` -- the vendor-documented sequence to start a core at
+  a specific vector table base: `alif_se_set_vtor()`, then
   `alif_se_reset_cpu()`, then `alif_se_release_cpu()`, in that order,
   stopping at (and returning) the first failure. This ordering is not a
   guess: it is how Alif's DFP documents these three services' side effects
@@ -134,10 +139,16 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr);
   fetched its initial SP/PC from its own local address 0 (uninitialized
   garbage), and locked up (`CFSR == 0x00000001` IACCVIOL,
   `HFSR == 0x40000000` FORCED), because BOOT_CPU never transfers the global
-  VTOR SET_VTOR staged -- only RESET_CPU does that. **UNVERIFIED ON SILICON
-  in this exact three-call form** -- it rests on Alif's own documented
-  service behaviour rather than the earlier enum-ordering guess, but this
-  specific sequence has not itself been exercised on E1M-AEN801 hardware.
+  VTOR SET_VTOR staged -- Alif's documentation names RESET_CPU as the step
+  that does. **UNVERIFIED ON SILICON in this exact three-call form** -- it
+  rests on Alif's own documented service behaviour rather than the earlier
+  enum-ordering guess. As of 2026-08-03 this exact sequence WAS run on
+  E1M-AEN801 (`AE822FA0E5597LS0`, cpu_id 2 / M55_HP, entry `0x50000000`):
+  all three calls returned success, but the documented SET_VTOR -> RESET_CPU
+  VTOR transfer was not independently confirmed -- the only VTOR reading
+  taken was post-attach over SWD and is confounded by the debugger's own
+  attach-time state clearing. See `docs/BENCH-DUALCORE.md` section 3.7 for
+  the full measurement.
 
 Return-code contract (documented in full in `include/alif_se_boot.h`, shared
 by every function that talks to the SE):

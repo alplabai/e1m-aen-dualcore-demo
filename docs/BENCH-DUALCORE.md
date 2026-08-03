@@ -15,10 +15,17 @@ Two runs matter here, and they release the peer core two different ways:
 - **2026-07-30, a bench-only alternative** -- a debugger loads and starts
   the peer core directly, standing in for the SETOOLS/ATOC mechanism: 369
   consecutive `PONG seq=N rtt=32..35 us` lines, no gaps, still running at
-  `seq=563` when the session ended. This does **not** survive a power cycle
-  and requires a debugger permanently attached; a customer carrier would
-  not do this in production. It is documented as the bench-only
-  alternative in section 3.
+  `seq=563` when the session ended. **`PONG seq=N` is HOST-side output**
+  (see the HOST sample in section 3.5), captured from the pre-rename
+  scratch build (before the `dualcore_hp`/`dualcore_he` ->
+  `dualcore_host`/`dualcore_remote` rename -- see section 0); this repo,
+  unmodified, cannot capture that same side on this bench today, because
+  the HOST role's console (`uart3`) is not physically routed there (section
+  3.5). This run does **not** survive a power cycle and requires a debugger
+  permanently attached; a customer carrier would not do this in production.
+  It is documented as the bench-only alternative in section 3, including a
+  2026-08-03 re-run of the same procedure that did not reproduce this
+  result (section 3.4).
 
 **Read this before assuming the bench shape matches the repo's board-naming
 convention.** It does not, exactly -- see step 0.
@@ -37,13 +44,17 @@ observed:
 - **RTSS-HE runs the RPMsg HOST** role and has SE access on this bench: it
   calls `alif_se_boot_cpu(2 /* M55-HP, EXTSYS_0 */, 0x50000000)` to release
   RTSS-HP.
-- **RTSS-HP runs the RPMsg REMOTE** role. It is released by the SE call
+- **RTSS-HP runs the RPMsg REMOTE** role. It is targeted by the SE call
   above, then loaded by a debugger (NOT by the SE/ATOC) into its own LOCAL
   `0x00000000` through an Access Port (AP) at `APAddr 0x00200000` that only
-  appears in the DAP's AP list AFTER the release, then started by register
+  appears in the DAP's AP list AFTER that SE call, then started by register
   surgery (section 3.4 below, for the bench-only debugger-placement flow --
   this describes the 2026-07-30 run specifically; the 2026-07-31 run in
-  section 2 released RTSS-HP a different way).
+  section 2 released RTSS-HP a different way). The AP's appearance is
+  evidence the SE call changed something about the cluster's debug domain --
+  it is equally consistent with that domain simply being powered/clocked as
+  a side effect, and is not by itself proof that the core was released to
+  run; see section 3.3.
 
 **This has since been fixed.** The apps are now named by RPMsg role, not by
 cluster -- `apps/dualcore_host` and `apps/dualcore_remote` -- and each builds
@@ -164,13 +175,16 @@ schema keys or values to fill a gap, a wrong ATOC costs a bench cycle:
 ### 2.3 Build command that actually produces the proven configuration
 
 **A default build of this repo does NOT produce the 495-PING/PONG
-configuration.** In `apps/dualcore_host/Kconfig`, both
+configuration.** In `apps/dualcore_host/Kconfig`,
 `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` and `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT`
-default to `n`, so a default build ships the `#else` fallback
-(`alif_se_start_cpu()`, `service_id` 501 `BOOT_CPU` against a plain
-`["load"]`-flagged entry) -- not the deferred-TOC release the 495-PING run
-used. `scripts/build-all.sh` passes neither option, so it also ships the
-fallback. Building this repo unmodified does NOT reproduce the proven run.
+are both members of the `DEMO_RELEASE_STRATEGY` choice, whose default is
+`DEMO_RELEASE_VIA_START_CPU` (neither of these two), so a default build
+ships the `alif_se_start_cpu()` path -- `SET_VTOR` (`service_id` 505) ->
+`RESET_CPU` (503) -> `RELEASE_CPU` (502) against a plain `["load"]`-flagged
+entry; it calls no `BOOT_CPU` (501) -- not the deferred-TOC release the
+495-PING run used. `scripts/build-all.sh` selects neither alternative, so it
+also ships the same default. Building this repo unmodified does NOT
+reproduce the proven run.
 
 To build the HOST image the way the 495-PING/PONG run actually used it, add
 `-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y` to the same MRAM-XIP build command
@@ -251,6 +265,27 @@ This is unresolved pending a fresh bench run. Do not assume either
 observation supersedes the other. `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT`
 remains in the tree, `default n`, as the fallback strategy (un-defer, then
 an explicit `BOOT_CPU` call) in case a future run needs it.
+
+Separately from that disagreement, Alif's SE Host Services API documentation
+(`SE_Host_Services_API_v1.109.0.pdf`) names the `SERVICES_boot_cpu`-style
+path (`BOOT_CPU`, service 501, and the
+`SERVICES_boot_reset_cpu()`/`SERVICES_boot_release_cpu()` pair it composes
+with) as the one carrying the M55-HP TCM-invalidation defect recorded in
+section 3.4, when the TCM is not reloaded between `RESET_CPU` and
+`RELEASE_CPU` -- p.115 documents that reload as the remedy, so the same
+sequence WITH the reload is documented as workable. The consequence for
+this repo: `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`, which the 495-PING/PONG run
+in 2.1 used, ships as a non-default member of the `DEMO_RELEASE_STRATEGY`
+choice. The shipped default, `CONFIG_DEMO_RELEASE_VIA_START_CPU`, composes
+`SET_VTOR`/`RESET_CPU`/`RELEASE_CPU` against an M55-HP peer
+(`AE822FA0E5597LS0`, cpu_id 2, entry `0x50000000`, as run on 2026-08-03)
+WITHOUT that TCM reload -- that specific combination is the one the vendor
+documents as defective for that core (see section 3.4), not a blanket
+verdict against the sequence itself (section 3.7 does not declare the
+`SET_VTOR` -> `RESET_CPU` -> `RELEASE_CPU` sequence wrong). This document
+states the mismatch and does not resolve it: it does not change either
+default, and does not recommend changing one, since a default build would
+then depend on an ATOC this repo does not commit (see 2.2).
 
 ### 2.6 Known false root cause -- read this before spending a day on it
 
@@ -419,13 +454,26 @@ and from ordinary `west flash`.
    this bench session; treat the 20 s as load-bearing until it is.
 4. `go` -- release the core to run.
 
+**Flow C is not reliably repeatable back-to-back.** On this bench unit
+(E1M-AEN801, `AE822FA0E5597LS0`), within the 2026-07-30 session this
+section documents, one attempt ran this identical script and did not
+release the peer -- `chip.hp examination failed` persisted for over 4
+minutes, and RTSS-HE was found still executing the resident MRAM image
+(`pc 0x8002236a`, `VTOR = 0x80010000`), not this step's freshly-loaded ITCM
+image. It took a `RSetType 2; r; g` reset before Flow C worked again on
+that same session. Treat a single successful Flow C run as session-local,
+not as proof the next attempt will behave the same way.
+
 ### 3.3 The OpenOCD config that reaches the released HP core
 
-RTSS-HP does not exist as a debuggable target until AFTER the SE release in
+RTSS-HP does not exist as a debuggable target until AFTER the SE call in
 section 3.2 of the app's own boot sequence (`alif_se_boot_cpu(2,
 0x50000000)`, called from the running HE image) -- its Access Port only
-appears in the DAP's AP list post-release, at `APAddr 0x00200000`. This
-OpenOCD config reaches it once that has happened:
+appears in the DAP's AP list after that call, at `APAddr 0x00200000`. That
+appearance shows the SE call changed the cluster's debug-domain state (most
+plausibly by powering/clocking it) -- it is not by itself proof that the
+core was released to run; see section 3.4 for what was actually observed
+after this OpenOCD config reaches the AP:
 
 ```
 adapter driver jlink
@@ -450,17 +498,73 @@ no separate unlock step is needed.
 
 ### 3.4 HP placement + register surgery (the debugger IS the boot mechanism here)
 
-**The ordering warning, in bold, first: the SE release in section 3.2's
-`alif_se_boot_cpu()` call WIPES the target core's TCM. An image written to
-RTSS-HP's local `0x00000000` BEFORE that release is destroyed by it. The
-image MUST be written AFTER `BOOT_CPU` (`service_id` 501) has already run,
-never before.** This is why the HP image cannot simply be pre-loaded and
-left resident the way the HE image is in section 3.2 -- the release itself
-erases whatever was there.
+**The ordering warning, in bold, first: write the HP image only AFTER the SE
+call in section 3.2 (`alif_se_boot_cpu()`, `BOOT_CPU`, `service_id` 501) has
+already run, never before.** This ordering is vendor-documented for the
+`RESET_CPU`/`RELEASE_CPU` path (p.115 below, scoped to Ensemble devices);
+the same ordering for the `BOOT_CPU`-only path this section actually uses
+remains an inference on this Ensemble part -- p.112's TCM passage is scoped
+to FUSION REV_Bx devices, not Ensemble, and concerns `SERVICES_boot_cpu`
+specifically, not `SERVICES_boot_reset_cpu()`/`SERVICES_boot_release_cpu()`.
+Alif's SE Host Services API documentation
+(`SE_Host_Services_API_v1.109.0.pdf`), p.112, on `SERVICES_boot_cpu`: "For
+the M55 cores, there are cases in which this service does not work. The
+currently known case is the M55-HP core in FUSION REV_Bx devices, where
+resetting the core also invalidates its TCM content." The same page notes
+this service "does not perform image loading, verification, etc., it just
+boots the core." p.115, on `SERVICES_boot_release_cpu`: "A known case is the
+M55-HP core in Ensemble devices. Because of that, after calling
+`SERVICES_boot_reset_cpu()` to stop the core, the image in the TCM must be
+reloaded, before calling `SERVICES_boot_release_cpu()`."
 
-Once the peer's `alif_se_boot_cpu(2, 0x50000000)` call (from the running
-HOST image, `apps/dualcore_host`'s Kconfig-default release target) has
-returned success and `chip.hp` is reachable per section 3.3:
+The two passages disagree on device scope -- p.112 names FUSION REV_Bx
+devices, p.115 names Ensemble devices -- and this document does not resolve
+that discrepancy; both are recorded here verbatim. `AE822FA0E5597LS0` (this
+SoM) is an Ensemble part, so p.115's stated scope covers it directly however
+p.112's is read. The vendor's own stated remedy, per p.115, is to reload the
+TCM image after `SERVICES_boot_reset_cpu()` stops the core and BEFORE
+calling `SERVICES_boot_release_cpu()`.
+
+This demo releases `CONFIG_DEMO_RELEASE_PEER_CPU_ID=2`, i.e. M55_HP --
+precisely the core both passages name. `alif_se_start_cpu()`
+(`modules/alif-se-boot`) issues `SET_VTOR` -> `RESET_CPU` -> `RELEASE_CPU`:
+`RESET_CPU` is the vendor-documented TCM-invalidating step for this core,
+and `RELEASE_CPU` then releases a core whose TCM was never reloaded, since
+this repo's sequence does not reload it between the two calls. That accounts
+for the measured post-release fault state (`CFSR = 0x00000101` = `IACCVIOL`
++ `IBUSERR`, `HFSR = 0x40000000` = `FORCED`, `pc 0xeffffffe`) without
+invoking any VTOR theory.
+
+**Which release call each of the surrounding paragraphs is about.** The
+paragraph above analyses `alif_se_start_cpu()`'s `SET_VTOR` -> `RESET_CPU`
+-> `RELEASE_CPU` composition -- the CURRENT `apps/dualcore_host` Kconfig
+default (`CONFIG_DEMO_RELEASE_VIA_START_CPU`) -- as vendor-documented
+background on why a TCM reload matters between `RESET_CPU` and
+`RELEASE_CPU`. The step below (`alif_se_boot_cpu(2, 0x50000000)`, `BOOT_CPU`
+alone) is the release call this section's own 2026-07-30 bench procedure
+actually used, from an EARLIER `main.c` revision that called
+`alif_se_boot_cpu()` alone, before the `alif_se_start_cpu()` fix landed
+(see `apps/dualcore_host/src/main.c`'s top-of-file comment). Do not read the
+paragraph above as a literal trace of what that earlier `BOOT_CPU`-only call
+did on this run.
+
+The practical ordering advice below is therefore supported rather than
+purely inferred: reading RTSS-HP's local `0x00000000` immediately after the
+SE call, before any debugger write -- on this bench unit (E1M-AEN801,
+`AE822FA0E5597LS0`), within this section's 2026-07-30 run -- showed
+`FEDC9ECE 511498BC CE6FBB3B EAE0460B`, not the image that may have been
+written there earlier in the session. That is consistent with the
+vendor-documented TCM invalidation, but is equally consistent with nothing
+having been written to that address this session at all, so it does not
+independently confirm the invalidation occurred. Do not rely on the HP
+image being pre-loaded and left resident the way the HE image is in
+section 3.2 -- write it only after this SE call has returned.
+
+Once the peer's `alif_se_boot_cpu(2, 0x50000000)` call (`BOOT_CPU` alone,
+service 501 -- the release call the HOST image used on this specific
+2026-07-30 run, from a `main.c` revision predating the `alif_se_start_cpu()`
+fix; NOT the `SET_VTOR`/`RESET_CPU`/`RELEASE_CPU` sequence analysed above)
+has returned success and `chip.hp` is reachable per section 3.3:
 
 1. `load_image build/ae822fa0e5597ls0/rtss_hp-itcm/zephyr/zephyr.bin
    0x00000000` -- write the ITCM-retargeted REMOTE image (built for
@@ -477,9 +581,8 @@ returned success and `chip.hp` is reachable per section 3.3:
      `xPSR`, not via a set bit in `pc`)
    - `xPSR` = `0x01000000` (T-bit set, everything else clear)
 4. Write-1-to-clear the fault status registers, in case the release left
-   the core in a fault state from the earlier VTOR==0 lockup class of
-   failure -- observed fault state before clearing: `CFSR = 0x00000101`
-   (`IACCVIOL` + `IBUSERR`), `PC = 0xEFFFFFFE`:
+   the core in a fault state -- observed fault state before clearing:
+   `CFSR = 0x00000101` (`IACCVIOL` + `IBUSERR`), `PC = 0xEFFFFFFE`:
    - `CFSR` (`0xE000ED28`) — write back its own current value
    - `HFSR` (`0xE000ED2C`) — write back its own current value
 5. **Leave `VTOR` at its reset value, `0x00000000`.** Do NOT set it to the
@@ -489,11 +592,52 @@ returned success and `chip.hp` is reachable per section 3.3:
    on why the SE-reported entry address is decorative on this path.
 6. `resume` -- release the core to run from the `pc`/`sp` just written.
 
+**2026-08-03 re-run on `AE822FA0E5597LS0` (E1M-AEN801, this bench unit): the
+procedure above, followed exactly as written, does not produce a working
+peer.** Two independent runs on this bench both ended with the REMOTE core
+printing `endpoint not bound after 5 s ...` repeatedly (49,825 repeats by
+the time each session was stopped); in both runs, `grep -c "PING seq\|endpoint
+bound"` against the captured (remote-side) console output returned `0` for
+both strings. `PONG seq` is not a valid criterion here -- it is HOST-side
+output (section 3.5) and could not appear in a REMOTE-side capture in any
+run. No PING and no `endpoint bound` line appeared in either run.
+
+After the register surgery in steps 3-5 above, the REMOTE core was read at
+`xPSR 0x41000003` (`IPSR = 3`, i.e. it is in the HardFault handler)
+persistently across five samples taken 500 ms apart, with `CFSR =
+0x00000000` and `HFSR = 0x00000000` -- so step 4's write-1-to-clear did take
+on the fault-status registers, but the core remained in HardFault anyway.
+`VTOR` read `0x00000000` (as step 5 intends) and `NVIC_ISER1 = 0x00000800`
+(IRQ 43 still enabled), and `pc` read `0x000064de`, which resolves to
+`uart_ns16550_poll_out` (same run and part as this paragraph's opening
+scope). In the same samples the HOST core (HE) was healthy:
+`xPSR 0x41000000` (`IPSR = 0`, Thread mode), `CFSR` and `HFSR` both
+`0x00000000`. The REMOTE's own Zephyr uptime advanced far slower than wall
+clock across the session -- `[00:00:00.961,000]` after roughly 2 minutes of
+wall-clock time, `[00:00:04.638,000]` after roughly 7.7 minutes.
+
+**What this does and does not establish.** With a HardFault active, the core
+executes at priority -1, which is numerically higher priority than every
+maskable exception including IRQ 43 (the RPMsg doorbell), SysTick, and
+PendSV -- so all three stay masked for as long as the fault is latched. That
+is consistent with everything measured above: the endpoint never binds (its
+IRQ never fires), Zephyr's own uptime clock advances at roughly 1% of
+wall-clock time (SysTick fires only rarely, not "never" -- the uptime did
+advance from `[00:00:00.961,000]` to `[00:00:04.638,000]` above, just far
+slower than wall clock), and the repeating nag message is paced by whatever
+UART write loop
+is still reachable from the fault context rather than by the application's
+intended 5-second timer (PendSV/the timer subsystem never runs). **This
+document does NOT assert a cause for the latched HardFault itself**, and
+does not claim an architectural reason why step 3's `xPSR = 0x01000000`
+write failed to clear `IPSR` back to 0 -- neither is established by the
+measurements above.
+
 ### 3.5 Expected output on both sides
 
 HE side (host, `apps/dualcore_host` logic, running from the resident-boot
-image placed per section 3.2). This is the only side actually captured on
-this bench -- see the note below:
+image placed per section 3.2). See the note below on which side's console
+is actually observable on this bench:
 
 ```
 === Alp Lab E1M-AEN dualcore demo -- HOST ===
@@ -507,9 +651,8 @@ PONG seq=563 rtt=34 us
 ```
 
 HP side (remote, `apps/dualcore_remote` logic, running from the image
-placed and started by the debugger per section 3.4). Expected content
-shown for completeness, but see the note below for why this side's console
-could not actually be captured on this bench:
+placed and started by the debugger per section 3.4). See the note below on
+which side's console is actually observable on this bench:
 
 ```
 === Alp Lab E1M-AEN dualcore demo -- REMOTE ===
@@ -525,15 +668,30 @@ PING seq=1 received; echoing PONG
 The `board target:` lines above reflect this repo's own board-naming
 convention (`rtss_hp`/`rtss_he`), which names which app built the image, not
 necessarily which silicon cluster it ran on during this particular bench
-session -- see section 0.
+session -- see section 0. **These two sample transcripts are illustrative of
+each role's OUTPUT SHAPE, not a literal capture from this bench session**:
+the HOST sample above shows `board target: .../rtss_hp` and the REMOTE
+sample shows `.../rtss_he`, which is the REVERSE of this bench's definitive
+mapping stated in the paragraph below (HOST on `rtss_he`, REMOTE on
+`rtss_hp`). Do not read the `board target:` line in either sample as a
+record of which qualifier ran where on this bench -- read the message
+bodies (`PONG seq=N` / `PING seq=N`) as the illustrative part.
 
-**The HP-side (remote) transcript above is NOT actually capturable on this
-bench.** The remote app's console is `uart3`, but only UART5 is physically
-routed to this bench's `/dev/ttyUSB2`. The HOST-side PONG count (369
-consecutive, no gaps) is the confirmation that the remote side was in fact
-running and echoing correctly -- every PONG implies a prior successful PING
-round trip -- but no direct transcript of the remote's own log lines exists
-from this bench session.
+**Which side is capturable on this bench is the OPPOSITE of what an earlier
+revision of this section said.** HOST (`apps/dualcore_host`) runs on
+RTSS-HE, whose board `.dts` fixes its console to `uart3`
+(`boards/alp/e1m_aen/e1m_aen_ae822fa0e5597ls0_rtss_he.dts`); REMOTE
+(`apps/dualcore_remote`) runs on RTSS-HP, whose console is `uart5`
+(`e1m_aen_ae822fa0e5597ls0_rtss_hp.dts`) -- see root `README.md` section 4.
+Only UART5 is physically routed on this bench unit; `uart3` is not. So it is
+the **REMOTE's** console that is routed/capturable here, and the **HOST's**
+that is not -- the reverse of the earlier claim that the HOST-side
+transcript above was "the only side actually captured."
+
+**Consequence:** the confirmation criterion this section describes above --
+a captured HOST-side `PONG seq=N rtt=NN us` transcript -- is **not
+obtainable from this repo unmodified on this bench**, because the HOST's own
+console UART is not physically routed there.
 
 On the debug side, confirmation that the release reached the core: HP's
 `NVIC_ISER1 = 0x00000800` (IRQ 43, the RPMsg doorbell, enabled) was read back
@@ -572,9 +730,91 @@ after `resume`.
   released this way; a `SYSRESETREQ` here does not do what it would on a
   normal standalone target and has not been characterized.
 - **Hold a labgrid reservation for the entire session.** Sections 3.2-3.5
-  above depend on state (the SE release, the AP's post-release appearance,
-  the core's fault-register contents) that another user's concurrent
-  session on the same bench would silently corrupt.
+  above depend on state (the SE release, the AP's post-release appearance --
+  itself consistent with the cluster's debug domain simply being
+  powered/clocked, and not by itself evidence that `RELEASE_CPU` succeeded,
+  see section 3.3 -- and the core's fault-register contents) that another
+  user's concurrent session on the same bench would silently corrupt.
+
+### 3.7 Breadcrumb measurement, 2026-08-03
+
+Everything in this subsection is scoped to `AE822FA0E5597LS0`,
+`CONFIG_DEMO_RELEASE_PEER_CPU_ID=2` (M55_HP),
+`CONFIG_DEMO_RELEASE_PEER_ENTRY=0x50000000`, this bench unit, and this date
+-- it does not generalize beyond that combination. Build used
+`-DEXTRA_CONF_FILE=breadcrumb.conf` (`CONFIG_DEMO_EXECUTION_BREADCRUMB=y`,
+per section 2.3), with the default `CONFIG_DEMO_RELEASE_VIA_START_CPU=y`
+strategy (`apps/dualcore_host/Kconfig`), i.e. `alif_se_start_cpu()`'s
+decomposed SET_VTOR / RESET_CPU / RELEASE_CPU form.
+
+Global SRAM0 `0x02000000`-`0x02000040`, read byte-identical across three
+independent debug sessions (all seventeen 32-bit words):
+
+```
+02000000 = 5A5AA5A5 A5A55A5A 5A5A5A5A 00000000
+02000010 = 00000076 0000000D 000000B0 000000F0
+02000020 = 00000076 0000000D 000000B0 000000F0
+02000030 = 00000000 00000000 00000000 70B88523
+02000040 = 940D9BA7
+```
+
+All three gate magics are present (`0x5A5AA5A5`
+`BREADCRUMB_MAGIC_EARLY`, `0xA5A55A5A` `BREADCRUMB_MAGIC_PRE_RELEASE`,
+`0x5A5A5A5A` `BREADCRUMB_MAGIC_POST_RELEASE`, per
+`CONFIG_DEMO_EXECUTION_BREADCRUMB`'s help text), and both SE-MHU frames read
+`PID0 = 0x76`, `CID0 = 0x0D` -- the genuine-ARM-MHUv2 signature that same
+help text names.
+
+**Baseline control:** a pre-run read of the same region, before the
+breadcrumb build was ever run, showed `0x02000000 = C0D90A65` and
+`0x02000030 = C1214F50 EBCA0219 0337C7A8 70B88523` -- different words from
+the post-run dump above, confirming the changed words in the post-run dump
+are real writes made by this run, not stale reads. `0x0200003C` (`70B88523`
+in both the baseline and the post-run dump) and `0x02000040` correctly
+stayed unwritten by this strategy -- that address is only used by the
+`CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` strategy (section 2.3), not
+`CONFIG_DEMO_RELEASE_VIA_START_CPU`.
+
+**Three zero return values:** per the `0x02000030`/`0x02000034`/`0x02000038`
+map above, `alif_se_set_vtor()`, `alif_se_reset_cpu()`, and
+`alif_se_release_cpu()` each returned `0`, and the whole-sequence retval at
+`0x0200000C` is also `0`. All three SE calls reported success on this run.
+An SE return code of `0` states only that the SE accepted and processed the
+request; it says nothing on its own about the peer core's resulting state.
+
+HP's `VTOR` (`0xE000ED08`) read `0x00000000`, `0x50000000` itself was
+unreadable (`Failed to read memory at 0x50000000`), and HP's local
+`0x00000000` held `0xFECC9BC2 0x510EB09D 0xAE6B1B3B 0xFAE9E70B` -- not a
+plausible vector table. **This is not evidence that the `SET_VTOR` ->
+`RESET_CPU` transfer failed.** This build's peer image is ITCM-linked with
+its own vector table at local `0x0`; per
+`apps/dualcore_host/Kconfig`'s `CONFIG_DEMO_RELEASE_PEER_ENTRY` help text,
+the reported entry `0x50000000` (the ITCM global alias for the same
+address) is decorative on this path -- the core fetches its initial SP/PC
+from its own local `0x0` regardless of `VTOR`. So `VTOR = 0x00000000` is
+consistent with the fault state recorded elsewhere in this section, but is
+not by itself the cause of it. It is also, separately, a POST-ATTACH
+reading, not a post-release one: the debugger's `init` printed `clearing
+lockup after double fault` and `external reset detected` on first attach
+(section 3.3), i.e. attaching itself perturbed the state being read. Do not
+treat this reading as an unperturbed record of what `RESET_CPU` left behind,
+and do not treat it as proof the `SET_VTOR` -> `RESET_CPU` transfer did not
+happen.
+
+**What this does and does not establish.** Alif documents that RESET_CPU
+(service 503) transfers the value a prior SET_VTOR (service 505) staged in
+the SE's Global VTOR register into the target core's own internal VTOR
+register -- see `modules/alif-se-boot/include/alif_se_boot.h`'s
+`alif_se_reset_cpu()` doc comment. That transfer was **not observed** on
+`AE822FA0E5597LS0`, cpu_id 2 (M55_HP), entry `0x50000000`, on this date: the
+three SE calls all reported success, but the only VTOR reading taken was
+post-attach and therefore confounded by the debugger's own attach-time state
+clearing, so it does not by itself prove the transfer did not happen either.
+This subsection does not declare the SET_VTOR -> RESET_CPU -> RELEASE_CPU
+sequence wrong, and does not propose switching to `alif_se_boot_cpu()`
+(`BOOT_CPU`, service 501) alone as a fix -- `apps/dualcore_host/src/main.c`'s
+top-of-file comment (`main.c:61-76`) already records that call measured
+failing on this exact silicon on an earlier run.
 
 ## 4. Known gaps / not yet closed
 
@@ -582,9 +822,11 @@ after `resume`.
   repository** -- see 2.2. A reader cannot reproduce the 495-PING/PONG run
   from a clean clone until it is.
 - **The shipped default does not build the proven configuration** -- see
-  2.3. Both `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` and
-  `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT` default `n`, and `scripts/build-all.sh`
-  passes neither.
+  2.3. `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` and
+  `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT` are both members of the
+  `DEMO_RELEASE_STRATEGY` choice, whose default is
+  `DEMO_RELEASE_VIA_START_CPU` (neither of these two), and
+  `scripts/build-all.sh` selects neither alternative either.
 - **Whether the deferred entry alone releases the peer, or a separate
   `BOOT_CPU` call is also required, is an open disagreement** between
   `apps/dualcore_host/Kconfig`'s help text and the 2.1 result -- see 2.5.
@@ -600,3 +842,19 @@ after `resume`.
 - The debugger-placement lineage in section 3 has not been repeated on the
   bench since the `dualcore_hp`/`dualcore_he` -> `dualcore_host`/
   `dualcore_remote` rename -- see section 0's final paragraph.
+- **A 2026-08-03 re-run of the section-3.4 debugger-placement procedure,
+  exactly as documented, measured `0` for both `PING seq` and `endpoint
+  bound` across two attempts** (the REMOTE core repeating `endpoint not
+  bound after 5 s ...` instead) -- see the new measurement recorded in
+  section 3.4. This remote-side capture is not comparable to the 2026-07-30
+  run's HOST-side `PONG seq` count (section 0, section 3.5); the two are
+  different sides of the link. The core was read persistently HardFaulted
+  after the register surgery; no cause for the fault is established.
+- **Flow C (section 3.2) is not reliably repeatable back-to-back** -- one
+  attempt did not release the peer and needed a `RSetType 2; r; g` reset
+  before a subsequent attempt worked.
+- **`alif_se_start_cpu()`'s SET_VTOR -> RESET_CPU -> RELEASE_CPU sequence
+  returns success on `AE822FA0E5597LS0` (cpu_id 2, entry `0x50000000`,
+  2026-08-03) without the vendor-documented VTOR transfer being confirmed**
+  -- see section 3.7. The only VTOR reading taken was post-attach and so is
+  not conclusive either way.
