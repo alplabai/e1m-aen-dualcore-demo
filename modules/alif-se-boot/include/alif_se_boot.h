@@ -64,32 +64,38 @@ extern "C" {
  * shape does NOT exercise -- see CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY in
  * apps/dualcore_host/Kconfig.
  *
- * WHAT THE ATOC MUST LOOK LIKE FOR THIS PATH -- TBD on the exact JSON field:
- * Alif's DFP source (`se_services/templates/services_test.c`) defines the
- * on-the-wire flag bit as `TOC_IMAGE_DEFERRED = 0x100u`, reported in the SES
- * table's flag-string legend at position `FLAG_STRING_DEFERRED` (index 5) as
- * the letter **`D`** -- i.e. an entry ready for this path should show `D` in
- * the SES table's flag column, the same place `["load"]`-only entries show
- * `uLV`. That resolves the flag LETTER. It does NOT resolve the ATOC-BUILDER
- * JSON field that PRODUCES that bit: every sample ATOC config found under
- * `/home/caner/alif-setools/app-release-exec-linux/build/config` (every
- * `.json` file there) (including this repo's own two-entry shapes, e.g.
- * `aen-dc-hostB-two-entry.json`'s `"flags": ["load"]` / `["boot"]`) uses only
- * `load`/`boot`/`compressed`/`encrypt`-shaped flag lists, never `deferred` or
- * any synonym; `app-gen-toc` (the ATOC-building tool itself) is a PyInstaller
- * binary whose flag vocabulary lives in an embedded, non-extracted
- * `utils/common/flags_global_defines.py` -- `strings -a` over the whole
- * binary found no "defer" substring at all. So: **TBD** -- the flag LETTER
- * (`D`) is confirmed from the DFP; the ATOC JSON KEY that sets it is not
- * determinable from what was in reach (checked: DFP source tree, all sample
- * ATOC configs under alif-setools, and the packed app-gen-toc binary's
- * strings). Guessing a field name here risks a wrong ATOC and a wasted bench
- * cycle -- confirm against Alif's ATOC-builder documentation (not present in
- * this environment) or by trial against a real `app-gen-toc` invocation before
- * relying on this path against real hardware.
+ * WHAT THE ATOC MUST LOOK LIKE FOR THIS PATH -- BENCH-CONFIRMED 2026-07-31:
+ * `"deferred"` is a valid MEMBER of an ATOC entry's `flags` ARRAY, alongside
+ * `"load"` / `"boot"` (e.g. `["load", "boot", "deferred"]`) -- NOT a sibling
+ * `"deferred": true` KEY on the entry, which the ATOC builder rejects. It sets
+ * `TOC_IMAGE_DEFERRED = 0x100` (per Alif's DFP source,
+ * `se_services/templates/services_test.c`) in that entry's on-the-wire flags
+ * word -- observed on the bench going `0x00000022` -> `0x00000122` when
+ * `"deferred"` was added to a working entry's flag list. The SES boot table
+ * reports this with the letter **`D`** in its flag column, at flag-string
+ * legend position `FLAG_STRING_DEFERRED` (index 5).
  *
- * UNVERIFIED ON SILICON -- see README.md, same caveat as every other function
- * in this header.
+ * A working peer entry is `["load", "boot", "deferred"]`. With `"deferred"`
+ * set, the SES ignores `"boot"` at cold boot: the table shows `uLs  D` in the
+ * flag column, a blank Dest Addr, and Time `0.00 ms` for that entry -- i.e.
+ * the SE loads and verifies the image but does not run it. Calling
+ * `alif_se_process_toc_entry()` afterwards issues `SERVICES_boot_process_toc_entry`
+ * (service 500), which performs load, verify, AND release together for that
+ * entry.
+ *
+ * The sample ATOC configs used to confirm this live under Alif SETOOLS'
+ * `app-release-exec-linux/build/config` directory (including this repo's own
+ * two-entry shapes, e.g. `aen-dc-hostB-two-entry.json`).
+ *
+ * REMAINING CAVEAT: a 0 return from this function means service 500
+ * (PROCESS_TOC_ENTRY) succeeded and the image is resident -- by itself it
+ * does NOT prove the peer core began executing. See
+ * CONFIG_DEMO_RELEASE_TOC_THEN_BOOT (apps/dualcore_host/Kconfig) for the
+ * belt-and-suspenders follow-up call this repo's demo uses to close that gap.
+ *
+ * BENCH-CONFIRMED for the ATOC-flag mechanics above (2026-07-31). The
+ * question of whether the PEER CORE itself began executing after this call is
+ * a separate, still-open question -- see the caveat immediately above.
  *
  * @param image_id ASCII name of the TOC entry to process, e.g. "ALP-HP" --
  *                 matches that entry's `image_identifier` field in the ATOC.
@@ -101,13 +107,19 @@ extern "C" {
  *                 string). @p image_id itself must be a NUL-terminated C
  *                 string (this function reads it with `strncpy()`).
  *
- * @retval 0    The SE reports PROCESS_TOC_ENTRY succeeded (same
- *              both-fields-zero rule as alif_se_boot_cpu()'s 0 retval).
- * @retval <0   A LOCAL transport failure, or -ENOTCONN if the SE never
- *              answered the readiness heartbeat -- see alif_se_boot_cpu()'s
- *              retval doc above for the full breakdown.
- * @retval >0   An SE-REPORTED error, clamped to INT_MAX -- see
- *              alif_se_boot_cpu()'s retval doc above.
+ * @retval 0        The SE reports PROCESS_TOC_ENTRY succeeded (same
+ *                  both-fields-zero rule as alif_se_boot_cpu()'s 0 retval).
+ * @retval -EINVAL  @p image_id is NULL, or its length exceeds
+ *                  ALIF_SE_TOC_ENTRY_ID_LEN (8) bytes -- checked before
+ *                  anything is sent to the SE, so a name that would otherwise
+ *                  be silently truncated by the wire copy (and end up
+ *                  addressing a DIFFERENT TOC entry) is rejected instead.
+ * @retval <0       Any other LOCAL transport failure, or -ENOTCONN if the SE
+ *                  never answered the readiness heartbeat -- see
+ *                  alif_se_boot_cpu()'s retval doc above for the full
+ *                  breakdown.
+ * @retval >0       An SE-REPORTED error, clamped to INT_MAX -- see
+ *                  alif_se_boot_cpu()'s retval doc above.
  */
 int alif_se_process_toc_entry(const char *image_id);
 

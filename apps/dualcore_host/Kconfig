@@ -129,17 +129,46 @@ config DEMO_EXECUTION_BREADCRUMB
 	  apart from -- with this option on -- exactly which of SET_VTOR /
 	  RESET_CPU / RELEASE_CPU got that far.
 
+choice DEMO_RELEASE_STRATEGY
+	prompt "Peer-core release strategy"
+	default DEMO_RELEASE_VIA_START_CPU
+	help
+	  Which SE call sequence src/main.c uses to release the peer core.
+	  Previously DEMO_RELEASE_VIA_TOC_ENTRY and DEMO_RELEASE_TOC_THEN_BOOT
+	  were two independent `bool`s, mutually exclusive only as an accident
+	  of src/main.c's #if/#elif ordering -- enabling both at once silently
+	  dropped one strategy with no warning anywhere. Making this a `choice`
+	  enforces the exclusion here, where it is declared, instead of relying
+	  on preprocessor ordering nobody is warned about.
+
+	  DISPUTED DEFAULT -- record this, do not "fix" it without new bench
+	  evidence: DEMO_RELEASE_VIA_START_CPU is kept as the default ONLY
+	  because that was the pre-existing EFFECTIVE default before this
+	  became a choice (both TOC-based options below were plain bools,
+	  `default n`) -- this is NOT a claim that alif_se_start_cpu() is the
+	  correct strategy for this silicon. Which strategy SHOULD default is
+	  genuinely unresolved and blocked on the original author -- see
+	  DEMO_RELEASE_VIA_TOC_ENTRY's and DEMO_RELEASE_TOC_THEN_BOOT's own
+	  help text below for two bench/PR accounts of this repo's history that
+	  directly contradict each other on whether the deferred-ATOC entry
+	  alone is sufficient.
+
+config DEMO_RELEASE_VIA_START_CPU
+	bool "alif_se_start_cpu() -- BOOT_CPU / SET_VTOR / RESET_CPU / RELEASE_CPU (default)"
+	help
+	  The pre-existing default path (see this choice's own help text for
+	  why it stays the default): src/main.c calls alif_se_start_cpu()
+	  (modules/alif-se-boot) -- or, with CONFIG_DEMO_EXECUTION_BREADCRUMB
+	  on, its decomposed SET_VTOR/RESET_CPU/RELEASE_CPU form -- the shape
+	  this repo's BENCH-DUALCORE.md documents as
+	  bench-proven-to-the-lockup-cause (see src/main.c's own top-of-file
+	  comment for the VTOR_S==0 lockup this replaced an earlier
+	  alif_se_boot_cpu()-only call to fix).
+
 config DEMO_RELEASE_VIA_TOC_ENTRY
 	bool "Release the peer via SE PROCESS_TOC_ENTRY instead of BOOT_CPU/SET_VTOR/RESET_CPU/RELEASE_CPU"
-	default n
 	help
-	  OFF by default -- src/main.c keeps calling alif_se_start_cpu()
-	  (or, with CONFIG_DEMO_EXECUTION_BREADCRUMB on, its decomposed
-	  SET_VTOR/RESET_CPU/RELEASE_CPU form), the shape this repo's
-	  BENCH-DUALCORE.md documents as bench-proven-to-the-lockup-cause. This
-	  option does not touch that default path at all.
-
-	  When ON, src/main.c instead calls
+	  When selected, src/main.c instead calls
 	  alif_se_process_toc_entry("ALP-HP") (modules/alif-se-boot,
 	  SE service_id 500) -- a DIFFERENT release mechanism: instead of this
 	  core telling the SE "release cpu_id at entry_addr" against an entry
@@ -178,29 +207,52 @@ config DEMO_RELEASE_VIA_TOC_ENTRY
 	  to get both the alternate release path and a bench-readable record of
 	  its result.
 
+	  DISPUTED OUTCOME -- two accounts already shipped in this repo's own
+	  history disagree about whether this strategy ALONE is enough to get
+	  the peer running, and this help text does not pick a winner between
+	  them:
+	    - CONFIG_DEMO_RELEASE_TOC_THEN_BOOT's own help text (below) reports
+	      a bench run in which, with this strategy alone, the peer's own
+	      beacon at 0x02000100 never reached 0xC3C33C3C -- i.e. by that
+	      account the peer never ran far enough to write it.
+	    - The pull request that shipped this code states the opposite in
+	      its own description: that the deferred ATOC entry alone works,
+	      citing 495 consecutive PING/PONG round-trips with no separate
+	      boot_cpu release required.
+	  Both accounts ship in this tree; neither is deleted in favor of the
+	  other. Treat this as UNRESOLVED pending a fresh bench run, not as a
+	  choice already made.
+
 config DEMO_RELEASE_TOC_THEN_BOOT
 	bool "Release the peer via SE PROCESS_TOC_ENTRY, then BOOT_CPU, in that order"
-	default n
 	help
-	  OFF by default. Independent of CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY above
-	  -- both are plain bools here, not a choice group, matching this file's
-	  existing shape -- but src/main.c's #if/#elif chain gives this option
-	  priority if both were somehow enabled at once, so only one release
-	  strategy is ever compiled into a given build.
-
 	  Tests the remaining candidate after CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY
 	  alone: on E1M-AEN801 silicon (2026-07-31), un-deferring the ALP-HP
 	  ATOC entry via alif_se_process_toc_entry() (SE service_id 500,
 	  PROCESS_TOC_ENTRY) bench-confirmed it MATERIALIZES the peer's image at
 	  CONFIG_DEMO_RELEASE_PEER_ENTRY (0x50000000) -- SRAM there went from
 	  uninitialized to the staged binary's first 16 words, all matching, in
-	  one boot -- but the peer core still did not start executing (its
-	  beacon at 0x02000100 never reached 0xC3C33C3C). This option follows
-	  that same un-defer call with this file's original alif_se_boot_cpu()
-	  release call (service_id 501, BOOT_CPU) against the SAME
-	  cpu_id/entry CONFIG_DEMO_RELEASE_PEER_CPU_ID/DEMO_RELEASE_PEER_ENTRY
-	  already name, stopping at the first failure, in case the peer needs
-	  that explicit release even after un-deferring has placed its image.
+	  one boot. This option follows that same un-defer call with this
+	  file's original alif_se_boot_cpu() release call (service_id 501,
+	  BOOT_CPU) against the SAME cpu_id/entry
+	  CONFIG_DEMO_RELEASE_PEER_CPU_ID/DEMO_RELEASE_PEER_ENTRY already name,
+	  stopping at the first failure, in case the peer needs that explicit
+	  release even after un-deferring has placed its image.
+
+	  DISPUTED OUTCOME -- this repo's own history ships two accounts of
+	  whether the un-defer step (CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY) alone
+	  is already sufficient, and they contradict each other; neither is
+	  deleted in favor of the other:
+	    - This option was written up from a bench run in which the peer
+	      core still did not start executing with the un-defer step alone
+	      -- its beacon at 0x02000100 never reached 0xC3C33C3C.
+	    - The pull request that shipped this code states the opposite in
+	      its own description: that the deferred entry alone works, citing
+	      495 consecutive PING/PONG round-trips with no separate boot_cpu
+	      release required (i.e. this option's second step would have been
+	      unnecessary).
+	  Do not treat either account as settled. This is UNRESOLVED pending a
+	  fresh bench run.
 
 	  Retvals, when CONFIG_DEMO_EXECUTION_BREADCRUMB is ALSO on:
 	  PROCESS_TOC_ENTRY's own retval is written to 0x02000040 -- the SAME
@@ -213,5 +265,7 @@ config DEMO_RELEASE_TOC_THEN_BOOT
 	  (`-DCONFIG_DEMO_RELEASE_TOC_THEN_BOOT=y -DEXTRA_CONF_FILE=breadcrumb.conf`)
 	  to get both this release path and a bench-readable record of which
 	  step, if either, objected.
+
+endchoice
 
 source "Kconfig.zephyr"

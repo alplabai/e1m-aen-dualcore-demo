@@ -78,19 +78,18 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr);
   own flags call for (load/verify/boot) AT CALL TIME instead of at cold boot.
   This is the SES-driven alternative to this repo's proven `alif_se_boot_cpu()`
   path against a plain `["load"]`-flagged entry (which the SES table reports
-  `uLV` -- Loaded+Verified, not Booted). The DFP source
-  (`se_services/templates/services_test.c`) confirms the on-wire flag bit
-  (`TOC_IMAGE_DEFERRED = 0x100`) and its SES table letter (`D`, at legend
-  position `FLAG_STRING_DEFERRED`) -- **what remains TBD is the ATOC-BUILDER
-  JSON field that sets that bit**: every sample ATOC config under
-  `alif-setools/app-release-exec-linux/build/config` (every `.json` file
-  there) uses only
-  `load`/`boot`/`compressed`/`encrypt`, never `deferred`, and `app-gen-toc`
-  itself is a PyInstaller binary whose flag vocabulary was not extractable
-  from what was in reach (`strings -a` found no "defer" substring in it at
-  all). See `alif_se_process_toc_entry()`'s doc comment in
-  `include/alif_se_boot.h` for the full account -- do not guess this field
-  name against real hardware.
+  `uLV` -- Loaded+Verified, not Booted). **BENCH-CONFIRMED 2026-07-31:**
+  `"deferred"` is a valid MEMBER of an ATOC entry's `flags` array (e.g.
+  `["load", "boot", "deferred"]`), not a sibling `"deferred": true` key; it
+  sets `TOC_IMAGE_DEFERRED = 0x100` in that entry's on-wire flags word
+  (observed `0x00000022` -> `0x00000122`) and shows as `D` in the SES table's
+  flag column (legend position `FLAG_STRING_DEFERRED`). With `"deferred"` set,
+  the SES ignores `"boot"` at cold boot (table shows `uLs  D`, a blank Dest
+  Addr, Time `0.00 ms`); `alif_se_process_toc_entry()` then performs load,
+  verify, and release together for that entry. A `0` return from that call
+  confirms the image is resident -- it does NOT by itself prove the peer core
+  began executing. See `alif_se_process_toc_entry()`'s doc comment in
+  `include/alif_se_boot.h` for the full account.
 - `alif_se_boot_cpu()` -- SE service_id 501 (BOOT_CPU) only. Does **not**
   transfer any vector table base into the target core's own VTOR register --
   see `alif_se_start_cpu()` below for the sequence that does.
@@ -247,10 +246,16 @@ must ALSO add a `zephyr,memory-region` node for this carve-out, e.g.:
 ```
 
 `ATTR_MPU_RAM_NOCACHE` is load-bearing, the same way it already is for the
-sibling `sram_ipc0` RPMsg vring carve-out in this repo's board `.dts`: it
-means the request/response structure needs NO D-cache flush/invalidate at
-all (the vendor transport's steps 3 and 7), because there is never a dirty
-cache line to push out or a stale one to discard.
+sibling `sram_ipc0` RPMsg vring carve-out in this repo's board `.dts`. It IS
+confirmed to program an MPU NOCACHE region here -- verified against Zephyr
+v4.4.0's DT-driven MPU configuration (`arch/arm/core/mpu/arm_mpu.c`) and the
+linked ELF's `mem_attr_region` table -- so `src/alif_se_boot.c`'s
+`sys_cache_data_flush_range()` / `sys_cache_data_invd_range()` calls (the
+vendor transport's steps 3 and 7) are a no-op on this build: there is never a
+dirty cache line to push out or a stale one to discard. They are kept anyway
+as defensive maintenance -- see `se_transport_transact()`'s comments in
+`src/alif_se_boot.c` for the full verification and for why the actual root
+cause of any SE-transport timeout is still open, not explained by caching.
 
 ### Address arithmetic (no overlap)
 

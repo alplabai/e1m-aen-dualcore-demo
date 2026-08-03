@@ -242,12 +242,20 @@ struct ping_pong_msg {
 };
 
 static K_SEM_DEFINE(bound_sem, 0, 1);
-static K_SEM_DEFINE(ping_sem, 0, 1);
 
-/* Written by ep_recv() (RPMsg backend's callback context), read by main()
- * only after ping_sem has been given.
+/* Handed from ep_recv() (RPMsg backend's callback context) to main() through
+ * ping_msgq below -- NOT through a shared global plus a binary semaphore.
+ * A semaphore only serializes the WAKEUP, not the data: with a plain global,
+ * a SECOND PING arriving while main() still has an ipc_service_send() for
+ * the FIRST one in flight (echoing ping_msg straight back, see main()'s loop
+ * below) would overwrite ping_msg out from under that in-flight send,
+ * corrupting the echoed PONG -- a real race on a link where the host can
+ * outrun this core's echo, not a theoretical one. k_msgq_put()/k_msgq_get()
+ * copy the whole struct by value into/out of the queue's own ring buffer, so
+ * main() always echoes its own private copy, immune to whatever ep_recv()
+ * does after handing it over.
  */
-static struct ping_pong_msg ping_msg;
+K_MSGQ_DEFINE(ping_msgq, sizeof(struct ping_pong_msg), 1, 4);
 
 static void ep_bound(void *priv)
 {
@@ -264,15 +272,30 @@ static void ep_bound(void *priv)
 
 static void ep_recv(const void *data, size_t len, void *priv)
 {
+	struct ping_pong_msg ping;
+
 	ARG_UNUSED(priv);
 
-	if (len != sizeof(ping_msg)) {
-		LOG_ERR("PING has unexpected length %zu (expected %zu); dropping", len, sizeof(ping_msg));
+	if (len != sizeof(ping)) {
+		LOG_ERR("PING has unexpected length %zu (expected %zu); dropping", len, sizeof(ping));
 		return;
 	}
 
-	memcpy(&ping_msg, data, sizeof(ping_msg));
-	k_sem_give(&ping_sem);
+	memcpy(&ping, data, sizeof(ping));
+
+	/* K_NO_WAIT: this callback runs on the RPMsg backend's own context and
+	 * must never block. If the queue is still full (main() has not
+	 * drained the previous PING yet -- i.e. its echoing
+	 * ipc_service_send() for it is still in flight), purge it first so
+	 * this newer PING always wins instead of being silently dropped by a
+	 * failing k_msgq_put() on a full queue -- k_msgq_purge() cannot fail
+	 * on a queue with no waiting receivers, so the retry below is
+	 * guaranteed to succeed.
+	 */
+	if (k_msgq_put(&ping_msgq, &ping, K_NO_WAIT) != 0) {
+		k_msgq_purge(&ping_msgq);
+		(void)k_msgq_put(&ping_msgq, &ping, K_NO_WAIT);
+	}
 }
 
 static struct ipc_ept_cfg ep_cfg = {
@@ -361,13 +384,21 @@ int main(void)
 	LOG_INF("endpoint bound; waiting for PING");
 
 	for (;;) {
-		k_sem_take(&ping_sem, K_FOREVER);
+		struct ping_pong_msg ping;
 
-		LOG_INF("PING seq=%u received; echoing PONG", ping_msg.seq);
+		k_msgq_get(&ping_msgq, &ping, K_FOREVER);
 
-		ret = ipc_service_send(&ep, &ping_msg, sizeof(ping_msg));
+		LOG_INF("PING seq=%u received; echoing PONG", ping.seq);
+
+		/* ping is this thread's own private copy (k_msgq_get() copied it
+		 * out of ping_msgq's ring buffer above) -- a PING arriving while
+		 * this send is in flight lands in a NEW queue entry, never in
+		 * the memory ipc_service_send() is reading here. See the
+		 * top-of-file comment above ping_msgq's definition.
+		 */
+		ret = ipc_service_send(&ep, &ping, sizeof(ping));
 		if (ret < 0) {
-			LOG_ERR("ipc_service_send() failed for PONG seq=%u: %d", ping_msg.seq, ret);
+			LOG_ERR("ipc_service_send() failed for PONG seq=%u: %d", ping.seq, ret);
 		}
 	}
 }
