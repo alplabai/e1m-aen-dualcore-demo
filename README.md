@@ -1,38 +1,55 @@
 # E1M-AEN dual-core (Cortex-M55 RTSS-HP + RTSS-HE) demo
 
-> **Read this first: a clean clone of this repository does not reproduce
-> either hardware result below, and the change described in this paragraph
-> has NOT itself been run on silicon yet.** The two gaps this banner
-> previously recorded here are now closed IN SOURCE, but unverified:
-> `apps/dualcore_host/Kconfig`'s `DEMO_RELEASE_STRATEGY` choice now defaults
-> to `DEMO_RELEASE_VIA_TOC_ENTRY` (previously `DEMO_RELEASE_VIA_START_CPU`),
-> and the ATOC JSON the deferred-release path depends on is now committed at
-> [`atoc/e1m-aen801-dualcore.json`](atoc/e1m-aen801-dualcore.json) (see
-> [`atoc/README.md`](atoc/README.md)) -- see `docs/BENCH-DUALCORE.md`
-> section 2.2/2.3. Closing this also required correcting the MRAM slot map
-> (root `README.md` section 5 / `docs/BENCH-DUALCORE.md` section 2.4.1) so
-> the HOST build actually links at the address the resident ATOC boots from,
-> `0x80010000` -- previously it linked at `0x80300000`, which the committed
-> ATOC's `ALP-HE` entry would not have matched. **None of this has been
-> exercised on the bench in this exact combined form** -- the 495-PING/PONG
-> result below was measured under the OLD (uncommitted-ATOC, non-default,
-> old-slot-map) conditions, by hand, not with this repo's current defaults.
-> `scripts/flash-dualcore.sh` is the new, also-unverified helper that stages
-> both images and this ATOC into an Alif Security Toolkit checkout and
-> writes it -- see that script's own header and `atoc/README.md`.
+> **Bench-proven, 2026-08-04: the deferred-ATOC path now runs from a clean
+> clone on E1M-AEN801.** Using this repo's own `scripts/flash-dualcore.sh`
+> against the committed
+> [`atoc/e1m-aen801-dualcore.json`](atoc/e1m-aen801-dualcore.json) -- no
+> by-hand ATOC, no by-hand Kconfig override -- on **E1M-AEN801**
+> (`AE822FA0E5597LS0` Rev A0): the SES boot table showed both entries
+> resident and booting (`ALP-HE` at `Boot Addr 0x80010000`, flags `u VB`;
+> `ALP-HP` flags `uLs  D`), identical again after a cold power cycle; the
+> REMOTE console (the physically routed side, `uart5`) showed uninterrupted
+> PING/PONG -- 177 lines/no gaps over a 90 s soak, no gaps across a warm
+> reset, no gaps across a 35 s cold power-off at 16.0 V; and MRAM
+> `0x80010000` held `dualcore_host.bin`'s own first four words, byte-for-byte,
+> unchanged by the cold power cycle. This closes the reproducibility gap
+> this banner previously recorded here -- a clean clone plus the
+> licence-gated Alif Security Toolkit now runs the demo. Full transcripts,
+> the `app-gen-toc`/`app-write-mram` output, and two operational details
+> worth knowing before you try it yourself (the padding warning on a
+> non-16-byte binary, and why only two files are ever staged even though
+> the ATOC has two boot-relevant entries) are in
+> `docs/BENCH-DUALCORE.md` section 2.7.
 >
-> **What is proven, and on what.** Two dual-core RPMsg ping/pong runs have
-> been performed on **E1M-AEN801** (`ae822fa0e5597ls0`) silicon:
+> **What this run does NOT settle.** It exercises this repo's shipped
+> default -- the deferred `ALP-HP` entry released via
+> `alif_se_process_toc_entry()` alone, `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT`
+> off (`default n`) -- and that worked, which is evidence for that shape
+> (recorded in section 2.5 below). It does NOT resolve section 2.5's
+> separate, older disagreement over whether the deferred entry ALONE is
+> sufficient IN GENERAL, versus a case needing a follow-up `BOOT_CPU` call:
+> this run only exercised the shipped default, not the disputed
+> alternative, so both contradicting bench accounts already in this tree
+> still stand.
 >
-> - **2026-07-31, the primary / customer-relevant result:** releasing the
->   peer core via a **deferred SETOOLS/ATOC entry** (Secure Enclave
+> **What is proven, and on what.** Three dual-core RPMsg ping/pong runs have
+> now been performed on **E1M-AEN801** (`ae822fa0e5597ls0`) silicon:
+>
+> - **2026-08-04, the reproducibility-closing run (see above and
+>   `docs/BENCH-DUALCORE.md` section 2.7):** the deferred-ATOC path
+>   exercised end to end from a clean clone -- committed ATOC, default
+>   Kconfig strategy, corrected MRAM slot map, `scripts/flash-dualcore.sh`
+>   -- with no by-hand ATOC and no by-hand Kconfig override. Survives a
+>   power cycle, no debugger attached -- the shape a customer carrier would
+>   actually ship, and now the one a clean clone actually reproduces.
+> - **2026-07-31, the first deferred-ATOC result:** releasing the peer core
+>   via the same **deferred SETOOLS/ATOC entry** mechanism (Secure Enclave
 >   `service_id` 500, `SERVICES_boot_process_toc_entry`, wrapped as
 >   `alif_se_process_toc_entry()`) -- **495 consecutive PING/PONG
->   round-trips over 4m11s, no drop, no gap.** This is the mechanism a
->   customer carrier would actually ship: no debugger attached, survives a
->   power cycle. See the reproducibility note above -- the source-level gaps
->   that blocked reproducing this from a clean clone are now closed, but the
->   closed-gap combination itself is unverified on the bench.
+>   round-trips over 4m11s, no drop, no gap.** This first run used a by-hand
+>   ATOC and a by-hand Kconfig override, under the OLD (pre-fix) MRAM slot
+>   map, not this repo's current defaults -- the 2026-08-04 run above is
+>   what closes that gap.
 > - **2026-07-30, a bench-only alternative:** the peer core placed and
 >   started by a debugger -- 369 consecutive PONGs, no gaps, **HOST-side
 >   output captured from the pre-rename scratch build** (before the
@@ -44,20 +61,20 @@
 >   production path. See the 2026-08-03 re-run of this same procedure in
 >   section 8 below and `docs/BENCH-DUALCORE.md` section 3.4.
 >
-> Both runs used the bench-proven role->core mapping this repo builds by
-> default -- HOST on `rtss_he`, REMOTE on `rtss_hp` -- because the resident
-> ATOC on that bench unit boots M55-HE first and only that cluster has
-> Secure Enclave access. See [`docs/BENCH-DUALCORE.md`](docs/BENCH-DUALCORE.md)
+> All three runs used the bench-proven role->core mapping this repo builds
+> by default -- HOST on `rtss_he`, REMOTE on `rtss_hp` -- because the
+> resident ATOC on that bench unit boots M55-HE first and only that cluster
+> has Secure Enclave access. See [`docs/BENCH-DUALCORE.md`](docs/BENCH-DUALCORE.md)
 > for the full procedure: section 0 explains why this is the MIRROR of what
 > the app names `dualcore_hp`/`dualcore_he` used to imply (apps are now
 > named `dualcore_host`/`dualcore_remote`, by role, for exactly this
-> reason); section 2 is the primary deferred-ATOC procedure, including the
-> now-source-closed-but-bench-unverified reproducibility gaps (2.2/2.3) and
-> an unresolved disagreement over whether the deferred entry alone releases
-> the peer (section 2.5); section 3 is the
-> debugger-placement alternative; section 4 lists what remains open. The
-> E1M-AEN401 (`ae402fa0e5597le0`) boot-cluster mapping has never been
-> observed on real silicon -- do not assume it matches E1M-AEN801's.
+> reason); section 2 is the primary deferred-ATOC procedure, now
+> bench-confirmed end to end by section 2.7's 2026-08-04 run, with the
+> section 2.5 disagreement over whether the deferred entry alone always
+> suffices still open; section 3 is the debugger-placement alternative;
+> section 4 lists what remains open. The E1M-AEN401 (`ae402fa0e5597le0`)
+> boot-cluster mapping has never been observed on real silicon -- do not
+> assume it matches E1M-AEN801's.
 
 ## 1. What this is
 
@@ -247,6 +264,31 @@ west build -p auto \
   -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2
 ```
 
+**The REMOTE role also needs a SEPARATE, ITCM-linked build for the
+SETOOLS/ATOC flashing path in section 7** -- the committed ATOC's `ALP-HP`
+entry is a `loadAddress` (ITCM-load) entry, not an `mramAddress` (XIP) one
+(see `atoc/README.md`'s "Which builds feed which entry" table), so it needs
+an image linked to run from the M55-HP ITCM, not the default MRAM-XIP build
+above. `scripts/build-all.sh` does **not** produce this variant -- build it
+directly:
+
+```sh
+west build -p auto \
+  -b e1m_aen/ae822fa0e5597ls0/rtss_hp \
+  -d build/ae822fa0e5597ls0/rtss_hp-itcm \
+  <repo>/apps/dualcore_remote \
+  -- \
+  -DBOARD_ROOT=<repo> \
+  -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2 \
+  "-DDTC_OVERLAY_FILE=boards/e1m_aen_ae822fa0e5597ls0_rtss_hp.overlay;itcm.overlay"
+```
+
+`scripts/flash-dualcore.sh` defaults to exactly this build output directory
+(`build/ae822fa0e5597ls0/rtss_hp-itcm`) alongside the HOST's
+`build/ae822fa0e5597ls0/rtss_he` from section 7 below -- see
+`docs/BENCH-DUALCORE.md` section 2.3 for the same command with the
+reasoning attached.
+
 For the E1M-AEN401 / `ae402fa0e5597le0` SoC, swap the board string and app
 arguments accordingly -- its boot-cluster mapping is unconfirmed, so
 `scripts/build-all.sh` applies the same default (HOST on `rtss_he`, REMOTE
@@ -264,15 +306,17 @@ scripts/build-all.sh all             # all four board targets, both SoCs
 **The HOST command above now builds with the deferred-ATOC release strategy
 by default** -- `apps/dualcore_host/Kconfig`'s `DEMO_RELEASE_STRATEGY`
 choice now defaults to `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`, so no extra
-`-D` flag is needed for that part. This is a SOURCE-LEVEL change, not a
-bench confirmation: the 495-PING/PONG result in the banner above was
-measured under the OLD default (`DEMO_RELEASE_VIA_START_CPU`), overridden
-by hand at build time, not under this new default. **This build alone is
-still not the complete proven-shape reproduction** -- it also needs the
-ATOC written from the now-committed `atoc/e1m-aen801-dualcore.json` (see
-`atoc/README.md` and section 7 below), which has not yet been exercised on
-the bench in this committed form. See `docs/BENCH-DUALCORE.md` sections 2.2
-and 2.3 for the full account.
+`-D` flag is needed for that part. **This build, paired with the ATOC
+written from the committed `atoc/e1m-aen801-dualcore.json` (see
+`atoc/README.md` and section 7 below), is now bench-proven** -- measured
+2026-08-04 on E1M-AEN801 (`AE822FA0E5597LS0` Rev A0) via
+`scripts/flash-dualcore.sh`, see `docs/BENCH-DUALCORE.md` section 2.7. The
+earlier 495-PING/PONG result in the banner above (2026-07-31) was measured
+under the OLD default (`DEMO_RELEASE_VIA_START_CPU`), overridden by hand at
+build time, and an ATOC built by hand -- the 2026-08-04 run is what
+confirms this repo's own committed defaults, not that first hand-built one.
+See `docs/BENCH-DUALCORE.md` sections 2.2, 2.3, and 2.7 for the full
+account.
 
 ## 7. Flashing and running
 
@@ -292,36 +336,61 @@ yet.
   realistic paths are:
   - **Alif SETOOLS/ATOC** (`app-gen-toc` + `app-write-mram`): this is the
     only option that gives a standalone, power-on-and-run demo with no
-    debugger attached. **This path HAS been exercised on the bench**
-    (2026-07-31, 495 consecutive PING/PONG round-trips, via a **deferred**
-    ATOC entry released at runtime through SE `service_id` 500,
-    `SERVICES_boot_process_toc_entry` -- see `docs/BENCH-DUALCORE.md`
-    section 2 for the full procedure), but that run used an ATOC built by
-    hand, against the OLD (pre-fix) slot map and the OLD (non-default)
-    Kconfig strategy. **What this repo now commits** to close the two
-    source-level reproducibility gaps that run left open: the ATOC JSON at
+    debugger attached. **This path HAS been exercised on the bench, in this
+    repo's exact committed, shipped-default form** (2026-08-04,
+    E1M-AEN801 `AE822FA0E5597LS0` Rev A0: `scripts/flash-dualcore.sh`
+    against the committed `atoc/e1m-aen801-dualcore.json`, no by-hand
+    edits -- see `docs/BENCH-DUALCORE.md` section 2.7 for the full record).
+    It was first exercised on 2026-07-31 (495 consecutive PING/PONG
+    round-trips, via a **deferred** ATOC entry released at runtime through
+    SE `service_id` 500, `SERVICES_boot_process_toc_entry` -- see
+    `docs/BENCH-DUALCORE.md` section 2.1), but that first run used an ATOC
+    built by hand, against the OLD (pre-fix) slot map and the OLD
+    (non-default) Kconfig strategy. The source-level gaps that first run
+    left open -- the ATOC JSON at
     [`atoc/e1m-aen801-dualcore.json`](atoc/e1m-aen801-dualcore.json) (see
     [`atoc/README.md`](atoc/README.md)), and `apps/dualcore_host/Kconfig`'s
-    `DEMO_RELEASE_STRATEGY` choice now defaulting to
-    `DEMO_RELEASE_VIA_TOC_ENTRY`. **This committed combination has not yet
-    been run on a bench** -- see `docs/BENCH-DUALCORE.md` sections 2.2 and
-    2.3 for the full account, and use `scripts/flash-dualcore.sh` to stage
-    and write it once you have both images built and an Alif Security
-    Toolkit checkout (the toolkit itself is licence-gated and is NOT
-    redistributed here).
+    `DEMO_RELEASE_STRATEGY` choice defaulting to
+    `DEMO_RELEASE_VIA_TOC_ENTRY` -- are what the 2026-08-04 run confirms
+    together, from a clean clone. Use `scripts/flash-dualcore.sh` to stage
+    and write it once you have both images built (section 6) and an Alif
+    Security Toolkit checkout (the toolkit itself is licence-gated and is
+    NOT redistributed here).
   - A debugger-attached start (halt one core, load/step the other via
     J-Link), which does not require ATOC but also does not survive a power
     cycle on its own -- see `docs/BENCH-DUALCORE.md` section 3.
-- **Ordering matters if you use the SETOOLS/ATOC path:** build both images
-  first, then write both MRAM slots (`slot0_partition` for `rtss_he` --
-  the HOST role, matching the resident ATOC's `0x80010000` boot address --
-  at `0x010000`, then `slot0_partition` for `rtss_hp` -- the REMOTE role --
-  at `0x300000`; see section 5), then write the ATOC last -- the ATOC
-  entry references both slots, so it must be written only after both slots
-  it points to already exist in MRAM. This applies to a deferred entry
-  exactly as it does to a plain one -- `"deferred"` changes WHEN the SES
-  processes the entry, not whether its image must already be in MRAM
-  first; see `docs/BENCH-DUALCORE.md` section 2.4.
+- **Ordering matters if you use the SETOOLS/ATOC path, but it is NOT "write
+  two MRAM slots, then write the ATOC".** The HOST and REMOTE roles are
+  staged and written through the SAME `app-gen-toc`/`app-write-mram` step,
+  not written to MRAM independently first, and the REMOTE role is never
+  written to `slot0_partition`'s `0x300000` offset by this flow at all:
+    1. Build both images (section 6): the HOST's default MRAM build
+       (`build/ae822fa0e5597ls0/rtss_he`) and the REMOTE's **ITCM** build
+       (`build/ae822fa0e5597ls0/rtss_hp-itcm`) -- NOT the REMOTE's default
+       MRAM build. See "Which build feeds which ATOC entry" below for why.
+    2. Stage both `.bin`s and `atoc/e1m-aen801-dualcore.json` into the Alif
+       Security Toolkit checkout (`scripts/flash-dualcore.sh` does this).
+    3. Run `app-gen-toc` against that config -- it builds ONE combined APP
+       TOC package containing the HOST's MRAM-XIP entry (`ALP-HE`,
+       `mramAddress 0x80010000`) and the REMOTE's ITCM-load entry (`ALP-HP`,
+       `loadAddress 0x50000000`) together. The REMOTE's image ends up
+       embedded INSIDE that package (confirmed in `app-package-map.txt`,
+       2026-08-04 -- see `docs/BENCH-DUALCORE.md` section 2.7), not at a
+       `slot0_partition` MRAM offset of its own.
+    4. Run `app-write-mram` to write the resulting package to MRAM, once,
+       last -- not two separate slot writes. `"deferred"` changes WHEN the
+       SES processes the `ALP-HP` entry (at the runtime
+       `alif_se_process_toc_entry()` call instead of at cold boot), not
+       whether the package needs to already be written first.
+  `boards/alp/e1m_aen/*_rtss_hp.dts`'s `slot0_partition` at `0x300000` (see
+  section 5) is real devicetree partitioning -- it is what the REMOTE's OWN
+  default, non-ITCM build links against -- but the SETOOLS/ATOC flow this
+  repo ships does not use that build or that address for the REMOTE role;
+  it uses the ITCM build, loaded into ITCM by SES at runtime, never flashed
+  to any MRAM offset of its own. **Do not write a REMOTE image to
+  `0x300000` expecting the resident ATOC to boot it there** -- nothing in
+  this repo's committed ATOC references that address. See
+  `docs/BENCH-DUALCORE.md` section 2.4 for the full account.
 - **Which build feeds which ATOC entry is documented precisely in
   `atoc/README.md`'s "Which builds feed which entry" table** -- `ALP-HE`
   takes the default MRAM HOST build, `ALP-HP` takes the ITCM REMOTE build.
@@ -338,29 +407,37 @@ yet.
   `sram_ipc0` shared-memory carve-out (`0x02010000`, 64 KB) were validated
   against the **E1M-AEN801 (E8 / `AE822FA0E5597LS0`)** silicon actually on
   the bench. They are **unverified on E4 / E1M-AEN401** silicon.
-- **Two hardware runs have been performed by this project**, both on
+- **Three hardware runs have been performed by this project**, all on
   E1M-AEN801 (E8 / `AE822FA0E5597LS0`) silicon -- see the banner above and
   `docs/BENCH-DUALCORE.md`: a debugger-driven placement run (2026-07-30,
-  369 consecutive PONGs, `docs/BENCH-DUALCORE.md` section 3) and a
-  standalone SETOOLS/ATOC run via a deferred entry (2026-07-31, 495
-  consecutive PING/PONG round-trips, `docs/BENCH-DUALCORE.md` section 2).
-  E1M-AEN401 (E4) has had no hardware run at all. Everything else above
-  reflects device-tree/Kconfig-level verification against upstream Zephyr
-  sources and the schematics/register documentation available at
-  authoring time, not a bench bring-up log.
-- **The two source-level gaps that blocked reproducing the SETOOLS/ATOC run
-  from a clean clone are now closed, but the combination is UNVERIFIED on
-  a bench.** The ATOC JSON is now committed
-  (`atoc/e1m-aen801-dualcore.json`, `docs/BENCH-DUALCORE.md` section 2.2),
-  and the default build now ships `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`
-  (section 2.3). Closing this also required correcting the MRAM slot map
-  (section 5) so the HOST build links at the resident ATOC's boot address.
-  None of this -- the committed ATOC, the new default, or the corrected
-  slot map -- has been exercised together on the bench yet. Separately,
+  369 consecutive PONGs, `docs/BENCH-DUALCORE.md` section 3), a standalone
+  SETOOLS/ATOC run via a deferred entry, by hand (2026-07-31, 495
+  consecutive PING/PONG round-trips, `docs/BENCH-DUALCORE.md` section 2.1),
+  and the same SETOOLS/ATOC mechanism exercised from a clean clone under
+  this repo's committed defaults (2026-08-04,
+  `docs/BENCH-DUALCORE.md` section 2.7). E1M-AEN401 (E4) has had no
+  hardware run at all. Everything else above reflects device-tree/
+  Kconfig-level verification against upstream Zephyr sources and the
+  schematics/register documentation available at authoring time, not a
+  bench bring-up log.
+- **RESOLVED 2026-08-04: the SETOOLS/ATOC run now reproduces from a clean
+  clone.** The two source-level gaps that previously blocked this -- the
+  ATOC JSON not being committed, and the Kconfig default not shipping the
+  deferred-TOC strategy -- were closed in source, and on 2026-08-04 the
+  full combination (committed `atoc/e1m-aen801-dualcore.json`, the
+  `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` default, and the corrected MRAM slot
+  map from section 5) was exercised together on E1M-AEN801
+  (`AE822FA0E5597LS0` Rev A0) via `scripts/flash-dualcore.sh`, with no
+  by-hand ATOC and no by-hand Kconfig override -- see
+  `docs/BENCH-DUALCORE.md` section 2.7 for the full measured record. This
+  does **NOT** resolve section 2.5's separate, still-open disagreement over
   whether the deferred entry alone releases the peer or a separate
-  `BOOT_CPU` call is also required remains an open, unresolved disagreement
-  between two documents in this tree (section 2.5) -- this change does not
-  resolve that question.
+  `BOOT_CPU` call is also required in general -- the 2026-08-04 run only
+  exercised this repo's shipped default (deferred entry alone, no
+  follow-up call), which is evidence for that shape but not a resolution
+  of the broader disagreement; see section 2.5 for both contradicting
+  bench accounts, still unresolved pending a fresh bench run that
+  specifically targets that question.
 - **On the section-3 debugger-placement path, a fresh 2026-08-03 attempt
   measured `0` for both `PING seq` and `endpoint bound` in the captured
   remote-side console output, alongside 49,825 repeats of `endpoint not

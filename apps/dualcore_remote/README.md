@@ -62,3 +62,28 @@ built for the OTHER qualifier of the same SoC -- see the root `README.md`'s
 MRAM partition warning before flashing either image over an `ensemble_e8_dk`
 build. `scripts/build-all.sh` builds every combination for you and prints
 which qualifier it picked as remote and why.
+
+## SEPARATE ITCM build, needed for the SETOOLS/ATOC flashing path
+
+The default MRAM build above is **not** what the committed
+`atoc/e1m-aen801-dualcore.json` needs for this app's role. That ATOC's
+`ALP-HP` entry is a `loadAddress` (ITCM-load) entry, not an `mramAddress`
+(XIP) one -- see `atoc/README.md`'s "Which builds feed which entry" table
+-- so it needs an image linked to run from the M55-HP ITCM instead:
+
+```sh
+west build -p auto \
+  -b e1m_aen/ae822fa0e5597ls0/rtss_hp \
+  -d build/ae822fa0e5597ls0/rtss_hp-itcm \
+  <repo>/apps/dualcore_remote \
+  -- \
+  -DBOARD_ROOT=<repo> \
+  -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2 \
+  "-DDTC_OVERLAY_FILE=boards/e1m_aen_ae822fa0e5597ls0_rtss_hp.overlay;itcm.overlay"
+```
+
+`scripts/flash-dualcore.sh` defaults to exactly this build output directory
+(`build/ae822fa0e5597ls0/rtss_hp-itcm`) when staging into a SETOOLS
+checkout -- see the root `README.md` section 7 and
+`docs/BENCH-DUALCORE.md` sections 2.3 and 2.7 (this exact build is what
+produced the bench-proven 2026-08-04 run).

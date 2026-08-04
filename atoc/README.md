@@ -1,11 +1,13 @@
 # ATOC config for the E1M-AEN801 dual-core demo
 
 This directory carries the ATOC (Application Table of Contents) config this
-repo's dual-core demo is built to work with. **It has not been run on
-silicon in this exact committed form** -- what follows documents what the
-change intends and how the pieces fit together, not a bench result. See the
-root `README.md` and `docs/BENCH-DUALCORE.md` for the actual measured runs
-and their caveats.
+repo's dual-core demo is built to work with. **It HAS been run on silicon
+in this exact committed form** -- measured 2026-08-04 on E1M-AEN801
+(`AE822FA0E5597LS0` Rev A0) via `scripts/flash-dualcore.sh`, with no
+by-hand edits to this file. See the root `README.md` and
+`docs/BENCH-DUALCORE.md` section 2.7 for the full measured record and their
+caveats (in particular, section 2.5's separate, still-open disagreement
+over whether the deferred `ALP-HP` entry alone always suffices).
 
 ## `e1m-aen801-dualcore.json`
 
@@ -85,6 +87,17 @@ changes WHEN SES processes the entry (at the runtime
 `alif_se_process_toc_entry()` call instead of at cold boot), not whether the
 image needs to already be present first. See `docs/BENCH-DUALCORE.md`
 section 2.4 and root `README.md` section 7.
+
+## A "NOT multiple of 16 bytes" warning from `app-write-mram` is expected, not an error
+
+`app-write-mram` pads any staged binary that is not a multiple of 16 bytes
+(MRAM's write granularity) up to the next multiple when run with `-p`,
+printing a warning naming the file and its size while it does so -- e.g.
+`the SIZE of .../dualcore_host.bin is NOT multiple of 16 bytes as required
+by MRAM` (observed 2026-08-04, `dualcore_host.bin` padded by 4 bytes). This
+is routine housekeeping, not a sign the write failed or the image is
+corrupt -- do not treat it as a fatal error or try to pre-pad the `.bin`
+yourself to silence it.
 
 ## SETOOLS is licence-gated -- not redistributed here
 

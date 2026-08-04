@@ -89,9 +89,16 @@ extern "C" {
  *
  * REMAINING CAVEAT: a 0 return from this function means service 500
  * (PROCESS_TOC_ENTRY) succeeded and the image is resident -- by itself it
- * does NOT prove the peer core began executing. See
- * CONFIG_DEMO_RELEASE_TOC_THEN_BOOT (apps/dualcore_host/Kconfig) for the
- * belt-and-suspenders follow-up call this repo's demo uses to close that gap.
+ * does NOT prove the peer core began executing. This repo's SHIPPED
+ * DEFAULT (CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY, apps/dualcore_host/Kconfig)
+ * calls ONLY this function, with no follow-up call, and that combination
+ * is what produced the bench-confirmed PING/PONG runs (see
+ * docs/BENCH-DUALCORE.md sections 2.1 and 2.7). CONFIG_DEMO_RELEASE_TOC_THEN_BOOT
+ * (same Kconfig, default n) is a SEPARATE, non-default choice that adds an
+ * explicit alif_se_boot_cpu() call after this one, kept selectable as a
+ * fallback in case a future bench run needs it -- see that option's own
+ * help text and docs/BENCH-DUALCORE.md section 2.5 for the still-open
+ * disagreement over whether it is ever actually required.
  *
  * BENCH-CONFIRMED for the ATOC-flag mechanics above (2026-07-31). The
  * question of whether the PEER CORE itself began executing after this call is
