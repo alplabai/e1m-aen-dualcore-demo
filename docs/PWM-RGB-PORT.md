@@ -68,20 +68,60 @@ From `alifsemi/zephyr_alif`, Apache-2.0:
 - the `alif,utimer` parent binding
 - `include/zephyr/dt-bindings/timer/alif_utimer.h`
 
-### 3.3 The clock controller — unavoidable
+### 3.3 The clock controller — mostly already upstream, with one trap
 
-The PWM node is a **child** of an `alif,utimer` node, and that parent
-carries `clocks = <&clockctrl ALIF_LPUTIMER_CLK>`. The driver resolves it
-with `DEVICE_DT_GET(DT_CLOCKS_CTLR(DT_INST_PARENT(n)))` and calls
-`clock_control_on()` and `clock_control_get_rate()` during init, so a clock
-controller must exist and be ready or `pwm_alif_init()` fails.
+Good news first: **upstream v4.4.0 already has the Alif clock controller**,
+so most of the feared dependency does not need porting at all. It ships:
 
-That means also porting `drivers/clock_control/clock_control_alif_ensemble.c`
-(`config CLOCK_CONTROL_ALIF`, `depends on DT_HAS_ALIF_CLOCKCTRL_ENABLED`),
-its `alif,clockctrl` binding, and the clock-ID dt-bindings header.
+- the node `clockctrl: clock-controller@1a602000`, `compatible =
+  "alif,clockctrl"`, already instantiated in
+  `dts/arm/alif/ensemble/common/ensemble_common.dtsi`
+- the driver `drivers/clock_control/clock_control_alif.c` (351 lines,
+  `DT_DRV_COMPAT alif_clockctrl`), `CONFIG_CLOCK_CONTROL_ALIF` defaulting on
+  when the node is enabled
+- the binding `dts/bindings/clock/alif,clockctrl.yaml`
+- the headers `dt-bindings/clock/alif-clocks-common.h` and
+  `alif-ensemble-clocks.h`
 
-This is the single largest unknown in the port's cost. Scope it before
-committing to the work.
+The upstream driver is **generic**: it decodes the `ALIF_CLK_CFG()` encoding
+into module ID, register offset and enable bit, and computes
+`base + reg_offset`. Nothing about it is UART-specific in the enable path.
+
+**The trap.** The UTIMER's clock ID cannot be expressed to it as-is.
+
+- Upstream's `alif-ensemble-clocks.h` is 62 lines and defines **UART clocks
+  only** — there is no `ALIF_UTIMER_CLK`.
+- In the Alif fork it is `#define ALIF_UTIMER_CLK ALIF_CLK(1U)`, and
+  `ALIF_CLK(value)` expands to `ALIF_CLK_CFG(DUMMY, DUMMY, value, 0U, 0U,
+  0U, 0U)` — i.e. a `DUMMY` module with `en_mask = 0` (nothing to write).
+  Upstream defines **neither** `ALIF_CLK()` nor a `DUMMY` module, and its
+  driver `__ASSERT`s on an unknown module ID.
+- Worse, and easy to miss: **the module IDs are renumbered between the two
+  trees.** Upstream has `ALIF_CGU_MODULE 0x0`, `CLKCTL_PER_MST 0x1`,
+  `CLKCTL_PER_SLV 0x2`, `AON 0x3`, `VBAT 0x4`, `M55HE_CFG 0x5`,
+  `M55HP_CFG 0x6`. The fork has CGU `0x1`, PER_MST `0x2`, PER_SLV `0x3`,
+  AON `0x4`. **Mixing a fork-built clock ID with the upstream driver
+  silently selects the wrong module and writes the wrong register.** Do not
+  copy clock IDs across without re-deriving them.
+
+Two ways out, and the second is recommended:
+
+1. Vendor the fork's fuller `clock_control_alif_ensemble.c` (670 lines) plus
+   its clock headers. Costly, and it collides with upstream's driver on the
+   same `alif,clockctrl` compatible — you would have to disable
+   `CONFIG_CLOCK_CONTROL_ALIF` and take over the node.
+2. **Drop `clock_control` from the vendored PWM driver.** `ALIF_UTIMER_CLK`
+   writes nothing (`en_mask = 0`), so the clock-controller call is not what
+   actually gates the timer — the driver separately calls
+   `alif_utimer_enable_timer_clock(global_base, cfg->timer_id)`, which is
+   the real per-timer enable in the UTIMER global register window. Replace
+   the `clock_control_get_rate()` call with a `clock-frequency` devicetree
+   property on the utimer node. This is a deliberate divergence from the
+   upstream driver and must be commented as such where it is made.
+
+Option 2 has NOT been implemented or tested. It rests on the reading that
+the `clockctrl` call is a no-op for this clock ID; confirm that against the
+fork's own driver before relying on it.
 
 ### 3.4 Devicetree nodes
 
@@ -110,8 +150,35 @@ Note the two-range `reg`: a per-instance timer window plus a **shared global**
 window (`0x4300C000`, 0x24 bytes) used for the cross-instance enable.
 
 For the RGB LED the needed instances are **utimer10** and **utimer11**, not
-the `lputimer` instances shown above — take their base addresses from the
-fork's dtsi rather than extrapolating.
+the `lputimer` instances shown above. Both are defined in the fork's
+`dts/arm/alif/ensemble/common/e1.dtsi` (not in `e4_e6_e8.dtsi`, which carries
+only the `lputimer` instances):
+
+```dts
+utimer10: utimer@4800b000 {
+	compatible = "alif,utimer";
+	reg = <0x4800B000 0x1000 0x48000000 0x24>;
+	reg-names = "timer", "global";
+	timer-id = <10>;
+	clocks = <&clockctrl ALIF_UTIMER_CLK>;   /* see section 3.3 -- do NOT copy this ID */
+	counter-direction = <ALIF_UTIMER_COUNTER_DIRECTION_UP>;
+	status = "disabled";
+
+	pwm10 { compatible = "alif,pwm"; #pwm-cells = <3>; status = "disabled"; };
+};
+
+utimer11: utimer@4800c000 {
+	/* identical shape; reg = <0x4800C000 0x1000 0x48000000 0x24>, timer-id = <11> */
+};
+```
+
+Note both share the same global window at `0x48000000`, and their IRQs are
+457-464 (utimer10) and 465-472 (utimer11), named `comp_capt_a`,
+`comp_capt_b`, `comp_a_buf1`, `comp_a_buf2`, `comp_b_buf1`, `comp_b_buf2`,
+`underflow`, `overflow`. A PWM-only example does not need the interrupts.
+
+So the RGB LED needs **both** instances enabled: green and blue are two
+channels of `utimer11`, red is channel 0 of `utimer10`.
 
 ## 4. A devicetree trap that will cost a bench cycle
 
@@ -131,10 +198,11 @@ children, one per colour, each with its own `pwms` phandle.
 
 ## 5. Pinctrl
 
-Upstream v4.4.0 does have `compatible = "alif,pinctrl"`, so pin muxing needs
-no new driver — only the right pinmux macros, of the form
-`PIN_P12_7__UT11_T1_C`, from
-`<zephyr/dt-bindings/pinctrl/alif-ensemble-pinctrl.h>`.
+Fully covered upstream — nothing to port. v4.4.0 has
+`compatible = "alif,pinctrl"` **and** the pinmux macros this example needs
+(`PIN_P12_7__UT11_T1_C`, `PIN_P12_6__UT11_T0_C`, `PIN_P2_4__UT10_T0_A`) in
+`<zephyr/dt-bindings/pinctrl/alif-ensemble-pinctrl.h>`, confirmed present in
+the pinned tree.
 
 These are PWM **output** pads, so no input-enable or bias configuration is
 required. (Input-enable/bias handling applies to *sensed* pads — I2C SDA/SCL,
