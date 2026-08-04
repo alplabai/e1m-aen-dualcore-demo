@@ -97,7 +97,8 @@ writes it with `app-write-mram`.
 
 ## 5. What you should see
 
-On the REMOTE console, from power-on:
+On the REMOTE console (`uart5` — the side actually routed on this repo's own
+bench carrier), from power-on:
 
 ```
 *** Booting Zephyr OS build v4.4.0 ***
@@ -111,9 +112,9 @@ On the REMOTE console, from power-on:
 A PING roughly every 500 ms, sequence numbers with no gaps. It comes back on
 its own after a power cycle — no debugger.
 
-The HOST prints the matching `PONG seq=N rtt=NN us` lines on **its** console,
-which is a different UART (see section 7) and may not be wired out on your
-carrier. If you only see the REMOTE side, that is expected.
+The HOST prints the matching `PONG seq=N rtt=NN us` lines on **its** console
+(`uart3`), which may not be wired to an accessible connector on your own
+carrier. If you only see the REMOTE side, that is expected — see section 7.
 
 ## 6. How it works
 
