@@ -306,7 +306,12 @@ BUILD_ASSERT(offsetof(struct alif_se_toc_entry_svc_request, body.resp_error_code
  * for an M55 core, this call transfers the value a prior SET_VTOR wrote into
  * the SE's Global VTOR register into that core's own internal VTOR register
  * -- SET_VTOR alone only ever touches the global one. That is the fact this
- * whole fix rests on: see alif_se_start_cpu() below.
+ * whole fix rests on: see alif_se_start_cpu() below. Alif documents this
+ * transfer; it was NOT observed on AE822FA0E5597LS0, cpu_id 2 (M55_HP),
+ * entry 0x50000000, 2026-08-03 -- the only VTOR reading taken was
+ * post-attach over SWD and confounded by the debugger's own attach-time
+ * state clearing, so it does not confirm the transfer happened, and does
+ * not disprove it either -- see docs/BENCH-DUALCORE.md section 3.7.
  */
 #define ALIF_SE_SVC_RESET_CPU 503U
 
@@ -1097,11 +1102,12 @@ int alif_se_start_cpu(uint32_t cpu_id, uint32_t entry_addr)
 	/*
 	 * SET_VTOR -> RESET_CPU -> RELEASE_CPU, per Alif's own DFP
 	 * documentation of what each service does (see this function's doc
-	 * comment in include/alif_se_boot.h for the full account) -- not the
+	 * comment in include/alif_se_boot.h for the full account, including the
+	 * 2026-08-03 E1M-AEN801 measurement and its scope) -- not the
 	 * SET_VTOR-then-BOOT_CPU enum-ordering guess an earlier revision of
 	 * this function used, which is what a bench run caught: BOOT_CPU never
 	 * transfers the global VTOR SET_VTOR staged into the released core's
-	 * own internal VTOR, only RESET_CPU does that.
+	 * own internal VTOR; Alif documents RESET_CPU as the step that does.
 	 */
 	ret = alif_se_set_vtor(cpu_id, entry_addr);
 	if (ret != 0) {

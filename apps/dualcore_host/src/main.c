@@ -41,7 +41,10 @@
  * <soc>), then watch two serial terminals -- the console for each is
  * whatever `zephyr,console` names for that board target (see the root
  * README.md's console-assignment table; the E1M carrier pinout for these
- * UARTs is NOT yet confirmed against real hardware).
+ * UARTs is still NOT confirmed against a schematic). On the E1M-AEN801
+ * bench unit specifically, UART5 (this app's console when built for
+ * rtss_hp) was observed physically routed; `uart3` (this app's console when
+ * built for rtss_he) was not -- see docs/BENCH-DUALCORE.md section 3.5.
  *
  * SECURE-ENCLAVE BOOT: this core is the one with SE access, so it is also
  * the one that asks the Secure Enclave to release its peer core before the
@@ -64,9 +67,13 @@
  * BOOT_CPU never transfers a vector table base into the core's own VTOR
  * register -- only RESET_CPU does that, and only after SET_VTOR has staged
  * the value. See modules/alif-se-boot/include/alif_se_boot.h's
- * alif_se_start_cpu() doc comment for the Alif DFP documentation this
- * ordering rests on. UNVERIFIED ON SILICON in this exact three-call form --
- * see modules/alif-se-boot/README.md.
+ * alif_se_start_cpu() doc comment for the Alif documentation this ordering
+ * rests on. As of 2026-08-03, this exact three-call form has been run on
+ * AE822FA0E5597LS0 (cpu_id 2 / M55_HP, entry 0x50000000): all three calls
+ * (SET_VTOR, RESET_CPU, RELEASE_CPU) returned success, but the peer's own
+ * VTOR register was still read, post-attach, as 0x00000000 -- see
+ * docs/BENCH-DUALCORE.md section 3.7 for the full measurement and why that
+ * post-attach reading does not settle the question either way.
  *
  * Ordering is deliberate: ipc_service_open_instance() on the HOST side
  * (this core) does not block waiting for the remote -- only the REMOTE

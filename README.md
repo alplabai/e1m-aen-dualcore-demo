@@ -1,5 +1,16 @@
 # E1M-AEN dual-core (Cortex-M55 RTSS-HP + RTSS-HE) demo
 
+> **Read this first: a clean clone of this repository does not reproduce
+> either hardware result below.** `apps/dualcore_host/Kconfig`'s
+> `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` is a member of the
+> `DEMO_RELEASE_STRATEGY` choice, whose default is
+> `DEMO_RELEASE_VIA_START_CPU` (not this option), so the default HOST build
+> ships the `alif_se_start_cpu()` fallback release path, not the
+> deferred-ATOC release the primary result below used -- see
+> `docs/BENCH-DUALCORE.md` section 2.3. The ATOC JSON file that primary
+> result depends on is also not committed to this repository -- see section
+> 2.2. Neither gap is closed yet.
+>
 > **What is proven, and on what.** Two dual-core RPMsg ping/pong runs have
 > been performed on **E1M-AEN801** (`ae822fa0e5597ls0`) silicon:
 >
@@ -9,14 +20,18 @@
 >   `alif_se_process_toc_entry()`) -- **495 consecutive PING/PONG
 >   round-trips over 4m11s, no drop, no gap.** This is the mechanism a
 >   customer carrier would actually ship: no debugger attached, survives a
->   power cycle. **The ATOC file this result depends on is not committed to
->   this repository** -- see `docs/BENCH-DUALCORE.md` section 2.2 -- and a
->   default build of this repo does not produce this configuration either --
->   see section 2.3. Neither gap is closed yet.
+>   power cycle. See the reproducibility note above for the two gaps that
+>   keep this from being reproduced from a clean clone.
 > - **2026-07-30, a bench-only alternative:** the peer core placed and
->   started by a debugger -- 369 consecutive PONGs, no gaps. Does not
+>   started by a debugger -- 369 consecutive PONGs, no gaps, **HOST-side
+>   output captured from the pre-rename scratch build** (before the
+>   `dualcore_hp`/`dualcore_he` -> `dualcore_host`/`dualcore_remote` rename;
+>   see `docs/BENCH-DUALCORE.md` section 0). This repo, unmodified, cannot
+>   capture that same side on this bench today -- the HOST role's console
+>   (`uart3`) is not physically routed there (section 4 below). Does not
 >   survive a power cycle and needs a debugger permanently attached; not a
->   production path.
+>   production path. See the 2026-08-03 re-run of this same procedure in
+>   section 8 below and `docs/BENCH-DUALCORE.md` section 3.4.
 >
 > Both runs used the bench-proven role->core mapping this repo builds by
 > default -- HOST on `rtss_he`, REMOTE on `rtss_hp` -- because the resident
@@ -115,15 +130,32 @@ out-of-tree in `modules/alif-mhuv2/`.
 
 | Board target | SoM | Silicon | Console UART |
 |---|---|---|---|
-| `e1m_aen/ae402fa0e5597le0/rtss_hp` | E1M-AEN401 (primary) | AE402FA0E5597LE0 | `uart4` (`uart@4901c000`) |
-| `e1m_aen/ae402fa0e5597le0/rtss_he` | E1M-AEN401 (primary) | AE402FA0E5597LE0 | `uart2` (`uart@4901a000`) |
-| `e1m_aen/ae822fa0e5597ls0/rtss_hp` | E1M-AEN801 (bench silicon) | AE822FA0E5597LS0 | `uart4` (`uart@4901c000`) |
-| `e1m_aen/ae822fa0e5597ls0/rtss_he` | E1M-AEN801 (bench silicon) | AE822FA0E5597LS0 | `uart2` (`uart@4901a000`) |
+| `e1m_aen/ae402fa0e5597le0/rtss_hp` | E1M-AEN401 (primary) | AE402FA0E5597LE0 | `uart5` (`uart@4901d000`) |
+| `e1m_aen/ae402fa0e5597le0/rtss_he` | E1M-AEN401 (primary) | AE402FA0E5597LE0 | `uart3` (`uart@4901b000`) |
+| `e1m_aen/ae822fa0e5597ls0/rtss_hp` | E1M-AEN801 (bench silicon) | AE822FA0E5597LS0 | `uart5` (`uart@4901d000`) |
+| `e1m_aen/ae822fa0e5597ls0/rtss_he` | E1M-AEN801 (bench silicon) | AE822FA0E5597LS0 | `uart3` (`uart@4901b000`) |
 
-This mirrors the console assignment on the upstream `ensemble_e8_dk`
-reference board exactly. **The E1M-AEN carrier pinout has not been confirmed
-against a schematic** -- every board `.dts` file that fixes `uart4`/`uart2`
-as the console carries a comment saying so.
+This does **not** mirror the upstream `ensemble_e8_dk` reference board's
+console assignment -- that board uses `uart2` (rtss_he) / `uart4` (rtss_hp).
+This board deliberately fixes `uart3`/`uart5` instead (see the
+`zephyr,console` property in each `boards/alp/e1m_aen/*.dts` file). **The
+E1M-AEN carrier pinout has not been confirmed against a schematic.**
+`boards/alp/e1m_aen/e1m_aen-pinctrl.dtsi` documents that both UART5 (E1M
+UART0, pads F2/G2) and UART3 (E1M UART1, pads AG4/AH4) reach the E1M
+module's own edge connector -- that is a SoM-level pad-routing fact, not a
+claim about any specific carrier board. What IS confirmed is a separate,
+THIS-BENCH-CARRIER-level fact: on the E1M-AEN801 bench carrier specifically
+(not the SoM), which of the two edge-connector UARTs that carrier's own
+board actually breaks out to somewhere a bench operator can reach it.
+**UART5 is the console that is actually routed on that bench carrier;
+`uart3` is not routed to an accessible connector there.** This does not
+contradict the SoM edge-connector pad table above -- it is a statement about
+this one carrier board's downstream wiring, not about the module's pads.
+Because on that bench the
+HOST role runs on `rtss_he` (console `uart3`) and the REMOTE role runs on
+`rtss_hp` (console `uart5`) -- see section 1 and
+`docs/BENCH-DUALCORE.md` section 0 -- the HOST side's console is not
+observable on that bench unit; only the REMOTE side's is.
 
 ## 5. MRAM partition map
 
@@ -207,8 +239,10 @@ scripts/build-all.sh all             # all four board targets, both SoCs
 **None of the commands above -- including `scripts/build-all.sh` -- build
 the configuration that produced the 495-PING/PONG result in the banner
 above.** `apps/dualcore_host/Kconfig`'s `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`
-defaults `n`, so the HOST build above ships the `alif_se_start_cpu()`
-fallback release path, not the deferred-ATOC release that run used. To
+is a member of the `DEMO_RELEASE_STRATEGY` choice, whose default is
+`DEMO_RELEASE_VIA_START_CPU` (not this option), so the HOST build above
+ships the `alif_se_start_cpu()` fallback release path, not the
+deferred-ATOC release that run used. To
 build the proven configuration, add `-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y`
 to the HOST `west build` invocation -- see
 `docs/BENCH-DUALCORE.md` section 2.3 for the exact command, and section 2.2
@@ -256,9 +290,10 @@ yet.
 ## 8. Known gaps / not yet verified
 
 - The E1M-AEN carrier pinout is **not confirmed** against a schematic; the
-  console UART assignment (`uart4` for RTSS-HP, `uart2` for RTSS-HE) is
-  inherited from the Alif Ensemble E8 DevKit reference board, not from an
-  E1M-AEN board bring-up.
+  console UART assignment (`uart5` for RTSS-HP, `uart3` for RTSS-HE) does
+  NOT match the Alif Ensemble E8 DevKit reference board (which uses `uart4`/
+  `uart2`) -- see section 4. On the E1M-AEN801 bench unit, UART5 is the
+  physically routed console; `uart3` is not routed there.
 - The MHU base addresses (`0x400B0000` TX, `0x400A0000` RX), IRQ 43, and the
   `sram_ipc0` shared-memory carve-out (`0x02010000`, 64 KB) were validated
   against the **E1M-AEN801 (E8 / `AE822FA0E5597LS0`)** silicon actually on
@@ -280,6 +315,31 @@ yet.
   deferred entry alone releases the peer or a separate `BOOT_CPU` call is
   also required is an open, unresolved disagreement between two documents
   in this tree (section 2.5).
+- **On the section-3 debugger-placement path, a fresh 2026-08-03 attempt
+  measured `0` for both `PING seq` and `endpoint bound` in the captured
+  remote-side console output, alongside 49,825 repeats of `endpoint not
+  bound after 5 s ...`.** Two runs of the documented procedure both left the
+  REMOTE core printing that line repeatedly; `grep -c "PING seq\|endpoint
+  bound"` against the captured (remote-side) console returned `0` for
+  both -- the endpoint never bound and no PING ever arrived. See
+  `docs/BENCH-DUALCORE.md` section 3.4.
+- **The section-3.4 register-surgery procedure, as documented, does not
+  recover the core.** After the surgery, the REMOTE core was read
+  persistently HardFaulted (`xPSR 0x41000003`) across five samples 500 ms
+  apart, with its Zephyr uptime advancing at roughly 1% of wall-clock time.
+  See `docs/BENCH-DUALCORE.md` section 3.4.
+- **The `alif_se_start_cpu()` SET_VTOR -> RESET_CPU -> RELEASE_CPU sequence
+  returns success on this silicon, but the only VTOR reading taken
+  afterwards does not confirm the documented VTOR transfer.** On a
+  2026-08-03 breadcrumb run (`AE822FA0E5597LS0`,
+  `CONFIG_DEMO_RELEASE_PEER_CPU_ID=2`,
+  `CONFIG_DEMO_RELEASE_PEER_ENTRY=0x50000000`), all three SE calls returned
+  `0`. The peer's `VTOR` register read `0x00000000`, but that reading was
+  taken POST-ATTACH (confounded by the debugger's own attach-time state
+  clearing) and this build's peer image is ITCM-linked with its vector
+  table at local `0x0`, so a `0x00000000` VTOR reading is uninformative
+  either way -- **this is not evidence that the transfer failed.** See
+  `docs/BENCH-DUALCORE.md` section 3.7.
 - **The root cause of the `-116` SE-transport failure the in-flight PR's
   D-cache-maintenance change targeted is NOT established.** That change's
   own stated rationale has been disproved against the linked ELF's
