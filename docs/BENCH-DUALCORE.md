@@ -9,9 +9,13 @@ Two runs matter here, and they release the peer core two different ways:
   round-trips over 4m11s, no drop, no gap.** This is the mechanism a
   customer carrier would actually ship: it survives a power cycle and needs
   no debugger attached. It is documented as the PRIMARY procedure in
-  section 2 below. **The ATOC file this run depends on is not committed to
-  this repository -- see section 2.2. Until it is, this result cannot be
-  reproduced from a clean clone.**
+  section 2 below. **The ATOC file this run's SHAPE depends on is now
+  committed to this repository at `atoc/e1m-aen801-dualcore.json` -- see
+  section 2.2 -- but this exact committed file, paired with the corrected
+  MRAM slot map and the now-default `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`
+  strategy, has not itself been run on a bench.** The 495-PING/PONG result
+  below was measured with a by-hand ATOC and a by-hand Kconfig override
+  under the OLD (pre-fix) slot map, not with this repo's current defaults.
 - **2026-07-30, a bench-only alternative** -- a debugger loads and starts
   the peer core directly, standing in for the SETOOLS/ATOC mechanism: 369
   consecutive `PONG seq=N rtt=32..35 us` lines, no gaps, still running at
@@ -139,58 +143,60 @@ together -- **no separate `alif_se_boot_cpu()` (`BOOT_CPU`, `service_id`
 contradicting bench observation on this exact point -- read it before
 assuming this is settled.)
 
-### 2.2 The ATOC this run depends on -- NOT committed to this repository
+### 2.2 The ATOC this run depends on -- now committed to this repository
 
-**The entire 495-PING/PONG result depends on a two-entry ATOC (Application
-Table of Contents) JSON, built with Alif SETOOLS' `app-gen-toc`, that is
-not committed anywhere in this tree.** Until it is, this result CANNOT be
-reproduced from a clean clone -- not by another engineer, not by a
-customer. **The authoritative ATOC JSON file must be committed to close
-this gap.**
+**This gap is now closed at the source level, but NOT re-verified on a
+bench.** A two-entry ATOC (Application Table of Contents) JSON, in the
+shape Alif SETOOLS' `app-gen-toc` consumes, is now committed at
+[`atoc/e1m-aen801-dualcore.json`](../atoc/e1m-aen801-dualcore.json) (see
+[`atoc/README.md`](../atoc/README.md) for the full field-by-field writeup).
+Reproducing the 495-PING/PONG result from a clean clone is no longer
+blocked on an uncommitted file -- it is still blocked on a fresh bench run
+against this exact committed shape, which has not happened yet.
 
-What is established about its required shape, verbatim, and nothing more --
-every field not listed below is **TBD**; do not invent `app-gen-toc`'s JSON
-schema keys or values to fill a gap, a wrong ATOC costs a bench cycle:
+The committed shape, matching what was established below from the
+2026-07-31 run and completing what was previously TBD:
 
-- Peer (REMOTE) entry, name `"ALP-HP"`: cpu_id M55_HP, loadAddress
-  `0x50000000`, `flags: ["load", "boot", "deferred"]` -- this is the
-  working shape that produced the 495-PING/PONG run in 2.1. `"deferred"`
+- Peer (REMOTE) entry, name `"ALP-HP"`: cpu_id `M55_HP`, `loadAddress
+  "0x50000000"`, `flags: ["load", "boot", "deferred"]` -- this is the
+  working shape that produced the 495-PING/PONG run in 2.1, and it is
+  exactly what `atoc/e1m-aen801-dualcore.json` now carries. `"deferred"`
   is a valid MEMBER of the entry's `flags` ARRAY, alongside `"load"` /
   `"boot"` -- a sibling `"deferred": true` KEY is rejected by the ATOC
   builder. It sets `TOC_IMAGE_DEFERRED = 0x100` in the entry's on-the-wire
-  flags word.
-- Host entry, name `"ALP-HE"`: cpu_id M55-HE, Boot Addr `0x80010000`. This
-  entry's own `flags` array value is **TBD** -- not established by this
-  project's bench sessions. (The SES boot table shows it boots at cold
-  boot with no operator action, so it plausibly does not carry
-  `"deferred"`, but that is an inference from behaviour, not a confirmed
-  field value -- do not encode it as fact.)
-- Every other field of the ATOC JSON schema -- exact key names (e.g.
-  whether the peer's load address key is literally `loadAddress`), image
-  binary file references, any signing/certificate fields, ATOC-level
-  metadata (version, entry count, ...) -- is **TBD**. Consult Alif
-  SETOOLS' `app-gen-toc` documentation or a working example ATOC, not this
-  document, to fill them in.
+  flags word. `"ALP-HP"` matches `apps/dualcore_host/src/main.c`'s
+  `DEMO_RELEASE_TOC_ENTRY_ID` literal exactly -- see `atoc/README.md`.
+- Host entry, name `"ALP-HE"`: cpu_id `M55_HE`, `mramAddress
+  "0x80010000"`, `flags: ["boot"]` (no `"deferred"`). This entry's flags
+  value was previously recorded here as TBD, inferred only from the SES
+  boot table showing it boots at cold boot with no operator action; it is
+  now committed as `["boot"]` on that same inference, still not
+  independently re-confirmed by a fresh bench observation of this exact
+  entry.
+- The `DEVICE` entry and its `app-device-config.json` binary are supplied
+  by the Alif Security Toolkit itself, not by this repository -- see
+  `atoc/README.md`'s licence-gating note.
+- Every other field of the ATOC JSON schema not shown in the committed
+  file -- exact key-name variants `app-gen-toc` might also accept, any
+  signing/certificate fields beyond the `"signed": true` shown, additional
+  ATOC-level metadata -- remains **TBD** beyond what is committed. Consult
+  Alif SETOOLS' `app-gen-toc` documentation for anything not shown in
+  `atoc/e1m-aen801-dualcore.json` itself.
 
 ### 2.3 Build command that actually produces the proven configuration
 
-**A default build of this repo does NOT produce the 495-PING/PONG
-configuration.** In `apps/dualcore_host/Kconfig`,
-`CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` and `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT`
-are both members of the `DEMO_RELEASE_STRATEGY` choice, whose default is
-`DEMO_RELEASE_VIA_START_CPU` (neither of these two), so a default build
-ships the `alif_se_start_cpu()` path -- `SET_VTOR` (`service_id` 505) ->
-`RESET_CPU` (503) -> `RELEASE_CPU` (502) against a plain `["load"]`-flagged
-entry; it calls no `BOOT_CPU` (501) -- not the deferred-TOC release the
-495-PING run used. `scripts/build-all.sh` selects neither alternative, so it
-also ships the same default. Building this repo unmodified does NOT
-reproduce the proven run.
-
-To build the HOST image the way the 495-PING/PONG run actually used it, add
-`-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y` to the same MRAM-XIP build command
-`apps/dualcore_host/README.md` documents as the bench-proven default (this
-is a normal MRAM/ATOC boot, not the ITCM/debugger-placement build in
-section 3):
+**A default build of this repo now ships the deferred-TOC release
+strategy, but this has not been re-confirmed on a bench.**
+`apps/dualcore_host/Kconfig`'s `DEMO_RELEASE_STRATEGY` choice now defaults
+to `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` (previously
+`DEMO_RELEASE_VIA_START_CPU`) -- see that Kconfig's own help text for the
+documented, measured reason: `alif_se_start_cpu()`'s
+`SET_VTOR`/`RESET_CPU`/`RELEASE_CPU` sequence resets the M55-HP peer, which
+invalidates its TCM (Alif SE Host Services API v1.109.0, p.112/p.115),
+producing `CFSR = 0x00000101` (`IACCVIOL` + `IBUSERR`), `PC = 0xEFFFFFFE`.
+`scripts/build-all.sh` inherits this new default too, since it does not
+override `DEMO_RELEASE_STRATEGY`. No `-D` flag is needed any more to get the
+deferred-TOC HOST build:
 
 ```sh
 west build -p auto \
@@ -199,45 +205,88 @@ west build -p auto \
   <repo>/apps/dualcore_host \
   -- \
   -DBOARD_ROOT=<repo> \
-  "-DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2;<repo>/modules/alif-se-boot" \
-  -DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y
+  "-DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2;<repo>/modules/alif-se-boot"
 ```
 
-REMOTE builds exactly as `apps/dualcore_remote/README.md` documents (no
-Kconfig change needed on that side -- the deferred-release mechanism is
-entirely a HOST-side/SE concern):
+(`-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y` is still accepted and is now a
+no-op against the default, kept here only as documentation of what the
+choice controls.)
+
+**The REMOTE side needs the ITCM build, not the default MRAM build**,
+because the committed ATOC's `ALP-HP` entry is a `loadAddress` (ITCM-load)
+entry, not an `mramAddress` (XIP) entry -- see `atoc/README.md`'s "Which
+builds feed which entry" table. Build it with the same ITCM
+`-DDTC_OVERLAY_FILE` pairing section 3.1 below uses for the
+debugger-placement path (semicolon-separated so the app's own board
+overlay is not silently dropped):
 
 ```sh
 west build -p auto \
   -b e1m_aen/ae822fa0e5597ls0/rtss_hp \
-  -d build/ae822fa0e5597ls0/rtss_hp \
+  -d build/ae822fa0e5597ls0/rtss_hp-itcm \
   <repo>/apps/dualcore_remote \
   -- \
   -DBOARD_ROOT=<repo> \
-  -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2
+  -DZEPHYR_EXTRA_MODULES=<repo>/modules/alif-mhuv2 \
+  "-DDTC_OVERLAY_FILE=boards/e1m_aen_ae822fa0e5597ls0_rtss_hp.overlay;itcm.overlay"
 ```
 
-For a bench-readable record of which SE step, if any, failed, pair the
-Kconfig option above with the breadcrumb overlay:
-`-DCONFIG_DEMO_RELEASE_VIA_TOC_ENTRY=y -DEXTRA_CONF_FILE=breadcrumb.conf` --
-the `PROCESS_TOC_ENTRY` return value lands at global SRAM0 `0x02000040`
-(see `apps/dualcore_host/Kconfig`'s `CONFIG_DEMO_EXECUTION_BREADCRUMB` help
-text for the full breadcrumb map).
+`scripts/flash-dualcore.sh` defaults to exactly these two build output
+directories (`build/ae822fa0e5597ls0/rtss_he` and
+`build/ae822fa0e5597ls0/rtss_hp-itcm`) when staging into a SETOOLS
+checkout.
+
+For a bench-readable record of which SE step, if any, failed, pair
+`-DEXTRA_CONF_FILE=breadcrumb.conf` with the HOST build above -- the
+`PROCESS_TOC_ENTRY` return value lands at global SRAM0 `0x02000040` (see
+`apps/dualcore_host/Kconfig`'s `CONFIG_DEMO_EXECUTION_BREADCRUMB` help text
+for the full breadcrumb map).
 
 ### 2.4 Flashing order
 
-Same ordering rule as any SETOOLS/ATOC build: build both images first, then
-write both MRAM slots (`slot0_partition` for `rtss_hp` at `0x000000`, then
-`slot0_partition` for `rtss_he` at `0x300000` -- see root `README.md`
-section 5), then write the ATOC last -- the ATOC entry references both
-slots, so it must be written only after both slots it points to already
-exist in MRAM. For the deferred-entry shape in 2.2, this ordering still
-applies to the peer's `["load", "boot", "deferred"]` entry: its image must
-already be written to its MRAM slot before the ATOC that references it is
-written, exactly as for a non-deferred entry -- `"deferred"` changes WHEN
-the SES processes the entry (at the runtime `alif_se_process_toc_entry()`
-call instead of at cold boot), not whether the image needs to already be in
-MRAM first.
+Build both images first, then stage both binaries and the ATOC config, then
+run `app-gen-toc`/`app-write-mram` last -- the ATOC entry references both
+binaries by name (`dualcore_host.bin`, `dualcore_remote.bin`), so it must be
+generated and written only after both are staged where `app-gen-toc` looks
+for them. `scripts/flash-dualcore.sh` does exactly this ordering: it copies
+the HOST default-MRAM build and the REMOTE ITCM build into the SETOOLS
+staging directory under the names `atoc/e1m-aen801-dualcore.json`
+references, copies that ATOC config into the SETOOLS config directory, THEN
+runs `app-gen-toc -f <config>` followed by `app-write-mram -c "$SE_UART" -p`
+-- see `atoc/README.md` and the script's own header comment. This applies to
+the deferred `ALP-HP` entry exactly as to the non-deferred `ALP-HE` entry:
+`"deferred"` changes WHEN the SES processes the entry (at the runtime
+`alif_se_process_toc_entry()` call instead of at cold boot), not whether the
+image needs to already be staged/written first.
+
+Separately, `ALP-HE`'s `mramAddress` (`0x80010000`) must match where the
+HOST Zephyr build actually links and gets flashed -- that is the board-level
+`slot0_partition` fix in `boards/alp/e1m_aen/e1m_aen_ae822fa0e5597ls0_rtss_he.dts`
+(section 2.4.1 below), not something `app-write-mram` reconciles on its own.
+`ALP-HP`'s `loadAddress` (`0x50000000`, the M55-HP ITCM global alias) is a
+runtime SES load target, not a `slot0_partition` MRAM offset -- see
+`atoc/README.md`'s "Which builds feed which entry" table for why that entry
+needs the ITCM-linked REMOTE build, not the default MRAM one.
+
+### 2.4.1 Why the slot assignment is by role, not by cluster
+
+The board files (`boards/alp/e1m_aen/e1m_aen_*_rtss_he.dts` /
+`..._rtss_hp.dts`) previously assigned `slot0_partition` the other way
+round: `rtss_hp` at `0x010000` and `rtss_he` at `0x300000`. That assignment
+put the HOST build (`rtss_he`) at MRAM `0x80300000`, not `0x80010000` -- the
+address the resident ATOC on this bench unit boots M55-HE from (section 1
+above), and the address the committed `atoc/e1m-aen801-dualcore.json`'s
+`ALP-HE` entry now names. With the old assignment, either the resident ATOC
+would boot whatever image was actually sitting at `0x80010000` (the REMOTE
+image, under the old mapping) instead of HOST, or a committed `ALP-HE` entry
+pointing at `0x80010000` would not match where the HOST build actually
+linked. The board files now assign `slot0_partition` by RPMsg role (HOST at
+`0x010000`, REMOTE at `0x300000`), matching both the resident ATOC's boot
+address and the committed ATOC's `ALP-HE` entry. **This has not yet been
+re-run on silicon** -- the reset-vector check in `scripts/build-all.sh`'s
+build output (`word[1]` of `zephyr.bin`, expected `0x8001xxxx` for the HOST
+build now) is the only confirmation so far that the swap took effect at
+build time.
 
 ### 2.5 Open disagreement: does the deferred entry alone release the peer?
 
@@ -275,17 +324,23 @@ section 3.4, when the TCM is not reloaded between `RESET_CPU` and
 `RELEASE_CPU` -- p.115 documents that reload as the remedy, so the same
 sequence WITH the reload is documented as workable. The consequence for
 this repo: `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY`, which the 495-PING/PONG run
-in 2.1 used, ships as a non-default member of the `DEMO_RELEASE_STRATEGY`
-choice. The shipped default, `CONFIG_DEMO_RELEASE_VIA_START_CPU`, composes
+in 2.1 used, now ships as the DEFAULT member of the `DEMO_RELEASE_STRATEGY`
+choice (previously `CONFIG_DEMO_RELEASE_VIA_START_CPU` was the default; see
+2.2/2.3). `DEMO_RELEASE_VIA_START_CPU` composes
 `SET_VTOR`/`RESET_CPU`/`RELEASE_CPU` against an M55-HP peer
 (`AE822FA0E5597LS0`, cpu_id 2, entry `0x50000000`, as run on 2026-08-03)
-WITHOUT that TCM reload -- that specific combination is the one the vendor
+WITHOUT a TCM reload -- that specific combination is the one the vendor
 documents as defective for that core (see section 3.4), not a blanket
 verdict against the sequence itself (section 3.7 does not declare the
-`SET_VTOR` -> `RESET_CPU` -> `RELEASE_CPU` sequence wrong). This document
-states the mismatch and does not resolve it: it does not change either
-default, and does not recommend changing one, since a default build would
-then depend on an ATOC this repo does not commit (see 2.2).
+`SET_VTOR` -> `RESET_CPU` -> `RELEASE_CPU` sequence wrong, and it remains
+selectable in the choice for comparison). This document previously stated
+the mismatch without resolving it, on the grounds that a default build
+would then depend on an ATOC this repo did not commit; that ATOC is now
+committed (2.2), which is what let the default change. The narrower
+question this paragraph does NOT resolve -- whether the deferred entry
+alone (with no subsequent `BOOT_CPU` call) is sufficient -- is the same
+open disagreement recorded earlier in this section, unresolved pending a
+fresh bench run.
 
 ### 2.6 Known false root cause -- read this before spending a day on it
 
@@ -537,8 +592,9 @@ invoking any VTOR theory.
 
 **Which release call each of the surrounding paragraphs is about.** The
 paragraph above analyses `alif_se_start_cpu()`'s `SET_VTOR` -> `RESET_CPU`
--> `RELEASE_CPU` composition -- the CURRENT `apps/dualcore_host` Kconfig
-default (`CONFIG_DEMO_RELEASE_VIA_START_CPU`) -- as vendor-documented
+-> `RELEASE_CPU` composition -- `CONFIG_DEMO_RELEASE_VIA_START_CPU`, the
+`apps/dualcore_host` Kconfig default AT THE TIME OF THIS 2026-07-30 run
+(it no longer is -- see section 2.2/2.3) -- as vendor-documented
 background on why a TCM reload matters between `RESET_CPU` and
 `RELEASE_CPU`. The step below (`alif_se_boot_cpu(2, 0x50000000)`, `BOOT_CPU`
 alone) is the release call this section's own 2026-07-30 bench procedure
@@ -743,9 +799,10 @@ Everything in this subsection is scoped to `AE822FA0E5597LS0`,
 `CONFIG_DEMO_RELEASE_PEER_ENTRY=0x50000000`, this bench unit, and this date
 -- it does not generalize beyond that combination. Build used
 `-DEXTRA_CONF_FILE=breadcrumb.conf` (`CONFIG_DEMO_EXECUTION_BREADCRUMB=y`,
-per section 2.3), with the default `CONFIG_DEMO_RELEASE_VIA_START_CPU=y`
-strategy (`apps/dualcore_host/Kconfig`), i.e. `alif_se_start_cpu()`'s
-decomposed SET_VTOR / RESET_CPU / RELEASE_CPU form.
+per section 2.3), with `CONFIG_DEMO_RELEASE_VIA_START_CPU=y` -- the
+`apps/dualcore_host/Kconfig` default AT THE TIME OF THIS RUN, no longer the
+default today (section 2.2/2.3) -- i.e. `alif_se_start_cpu()`'s decomposed
+SET_VTOR / RESET_CPU / RELEASE_CPU form.
 
 Global SRAM0 `0x02000000`-`0x02000040`, read byte-identical across three
 independent debug sessions (all seventeen 32-bit words):
@@ -818,15 +875,13 @@ failing on this exact silicon on an earlier run.
 
 ## 4. Known gaps / not yet closed
 
-- **The ATOC file behind the 2.1 result is not committed to this
-  repository** -- see 2.2. A reader cannot reproduce the 495-PING/PONG run
-  from a clean clone until it is.
-- **The shipped default does not build the proven configuration** -- see
-  2.3. `CONFIG_DEMO_RELEASE_VIA_TOC_ENTRY` and
-  `CONFIG_DEMO_RELEASE_TOC_THEN_BOOT` are both members of the
-  `DEMO_RELEASE_STRATEGY` choice, whose default is
-  `DEMO_RELEASE_VIA_START_CPU` (neither of these two), and
-  `scripts/build-all.sh` selects neither alternative either.
+- **The ATOC file behind the 2.1 result is now committed to this
+  repository (`atoc/e1m-aen801-dualcore.json`), and the shipped default now
+  builds the deferred-TOC strategy -- but this exact combination, together
+  with the corrected MRAM slot map, has NOT been run on a bench.** See 2.2,
+  2.3, and 2.4.1. The 495-PING/PONG result itself was measured under the
+  OLD (uncommitted-ATOC, non-default-strategy, old-slot-map) conditions,
+  not this one.
 - **Whether the deferred entry alone releases the peer, or a separate
   `BOOT_CPU` call is also required, is an open disagreement** between
   `apps/dualcore_host/Kconfig`'s help text and the 2.1 result -- see 2.5.

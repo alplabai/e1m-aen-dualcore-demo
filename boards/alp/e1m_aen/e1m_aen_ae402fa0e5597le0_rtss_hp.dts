@@ -31,12 +31,21 @@
  * upstream ensemble_e8_dk does and which would make flashing the second image
  * overwrite the first).
  *
+ * Slots are assigned by RPMsg ROLE, mirroring the E1M-AEN801 (ae822fa0e5597ls0)
+ * layout, so both SoCs stay consistent: HOST (rtss_he) at the lower slot, REMOTE
+ * (this file, rtss_hp) at the upper one. UNLIKE the ae822fa0e5597ls0 pair, this
+ * mapping is NOT bench-confirmed on E4 (AE402FA0E5597LE0) silicon -- no ATOC
+ * boot-address observation has ever been made on this SoC. It is applied here
+ * for consistency with the observed E8 shape, not because it has been measured
+ * on E4 hardware.
+ *
  *   0x000000-0x00FFFF (  64 KB) : reserved -- this bench's slot0 convention starts the
  *                                 first image at MRAM base + 0x10000, and the Flow D
  *                                 helper ABORTS on a reset vector reading 8000xxxx
- *                                 (base-linked). Verified on E1M-AEN801 2026-07-30.
- *   0x010000-0x2FFFFF (3008 KB) : rtss_hp image  (this file)
- *   0x300000-0x55FFFF (2432 KB) : rtss_he image  (see e1m_aen_*_rtss_he.dts)
+ *                                 (base-linked). Verified on E1M-AEN801 2026-07-30;
+ *                                 UNCONFIRMED on this SoC.
+ *   0x010000-0x2FFFFF (3008 KB) : HOST image, rtss_he  (see e1m_aen_*_rtss_he.dts)
+ *   0x300000-0x55FFFF (2432 KB) : REMOTE image, rtss_hp  (this file)
  *   0x560000-0x57FFFF ( 128 KB) : deliberately UNPARTITIONED headroom reserved for
  *                                 the Alif SETOOLS/ATOC application table (the tool
  *                                 that stitches multiple core images into one flashable
@@ -60,14 +69,15 @@
 		 */
 
 		/*
-		 * Starts at 0x10000, NOT 0x0. The bench's resident slot0 lives at
-		 * 0x80010000 and scripts/bench/aen/flash-jlink-mramxip.sh aborts if the
-		 * reset vector reads 8000xxxx instead of 8001xxxx. Ends exactly at
-		 * 0x300000 where the rtss_he slot begins -- abutting, non-overlapping.
+		 * Starts at 0x300000, NOT 0x10000, mirroring the E1M-AEN801 (E8)
+		 * REMOTE slot for consistency -- NOT independently bench-confirmed
+		 * on this SoC (E4 boot-cluster mapping never observed on real
+		 * silicon). Ends at 0x560000, leaving 0x560000-0x57FFFF (128 KB)
+		 * free for the Alif SETOOLS/ATOC application table.
 		 */
-		slot0_partition: partition@10000 {
+		slot0_partition: partition@300000 {
 			label = "image-0";
-			reg = <0x10000 DT_SIZE_K(3008)>;
+			reg = <0x300000 DT_SIZE_K(2432)>;
 		};
 	};
 };

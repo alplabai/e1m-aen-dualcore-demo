@@ -22,12 +22,15 @@ section on what has/hasn't been exercised on real hardware).
 
 ## What it does
 
-1. Asks the Alif Secure Enclave to release its peer core
-   (`alif_se_start_cpu()`, see `Kconfig` and `src/main.c`'s top-of-file
-   comment for which core and why) before opening `ipc0`. Every outcome
-   (success, local transport failure, SE-reported error) is logged and
-   never aborts the demo -- this side keeps running as host even if the
-   release fails.
+1. Asks the Alif Secure Enclave to release its peer core before opening
+   `ipc0`, using whichever strategy `Kconfig`'s `DEMO_RELEASE_STRATEGY`
+   choice selects -- by default `alif_se_process_toc_entry()` against the
+   deferred ATOC entry `atoc/e1m-aen801-dualcore.json` commits (see
+   `Kconfig` and `src/main.c`'s top-of-file comment for the other
+   selectable strategies, including `alif_se_start_cpu()`, and for which
+   core and why). Every outcome (success, local transport failure,
+   SE-reported error) is logged and never aborts the demo -- this side
+   keeps running as host even if the release fails.
 2. Opens the `ipc0` IPC-service instance and registers one endpoint
    (`dualcore_ping_pong`).
 3. Waits for the endpoint to bind to its `dualcore_remote` counterpart,
