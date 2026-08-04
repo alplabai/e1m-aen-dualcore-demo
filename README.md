@@ -39,7 +39,8 @@ it.
 
 ## 3. Build
 
-Three images. `<repo>` is the absolute path to this checkout.
+Two images — these are the two the flashing step in section 4 consumes.
+`<repo>` is the absolute path to this checkout.
 
 **HOST** (runs on RTSS-HE):
 
@@ -80,7 +81,10 @@ the command above.
 ## 4. Flash
 
 ```sh
-export SETOOLS_DIR=/path/to/alif-security-toolkit
+# SETOOLS_DIR is the toolkit's INNER directory -- the one that contains
+# app-gen-toc, app-write-mram, build/ and utils/. On a stock extraction that
+# is <wherever-you-unpacked-it>/app-release-exec-linux, not the folder above it.
+export SETOOLS_DIR=/path/to/app-release-exec-linux
 export SE_UART=/dev/ttyUSB0          # the SE-UART on your carrier
 
 scripts/flash-dualcore.sh \
