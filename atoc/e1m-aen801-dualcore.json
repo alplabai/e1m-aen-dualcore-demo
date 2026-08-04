@@ -1,0 +1,7 @@
+{
+    "DEVICE":  { "disabled": false, "binary": "app-device-config.json", "version": "0.5.00", "signed": true },
+    "ALP-HE":  { "disabled": false, "binary": "dualcore_host.bin",   "version": "1.0.0", "signed": true,
+                 "cpu_id": "M55_HE", "mramAddress": "0x80010000", "flags": ["boot"] },
+    "ALP-HP":  { "disabled": false, "binary": "dualcore_remote.bin", "version": "1.0.0", "signed": true,
+                 "cpu_id": "M55_HP", "loadAddress": "0x50000000", "flags": ["load", "boot", "deferred"] }
+}
