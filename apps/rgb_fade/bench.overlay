@@ -1,0 +1,39 @@
+/*
+ * SPDX-FileCopyrightText: Copyright 2026 Alp Lab AB
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Bench overlay for rgb_fade -- RAM-run + routed console.
+ *
+ * Layer this ON TOP of the board overlay (semicolon-separated in
+ * DTC_OVERLAY_FILE; passing it alone REPLACES the auto-picked board overlay
+ * and the PWM nodes disappear).
+ *
+ * Two changes, both bench-specific and neither wanted in a shipped image:
+ *
+ * 1. Console -> uart5. The E1M-AEN carrier routes UART5 to the accessible
+ *    connector; the board default (uart2 on the DevKit) is not reachable
+ *    there, so without this the app runs blind.
+ *
+ * 2. RAM-run out of ITCM instead of MRAM XIP, so the image can be placed
+ *    with a J-Link `loadbin` and started without writing MRAM at all --
+ *    nothing on the board is overwritten.
+ *
+ *    Use the PATH-REFERENCE form `&itcm`, not the phandle-array form
+ *    `<&itcm>`: the latter parses but yields FLASH_SIZE=0 and the link then
+ *    overflows with nowhere to place the image.
+ */
+
+/ {
+	chosen {
+		zephyr,flash = &itcm;
+		/delete-property/ zephyr,code-partition;
+
+		zephyr,console   = &uart5;
+		zephyr,shell-uart = &uart5;
+	};
+};
+
+&uart5 {
+	status = "okay";
+	current-speed = <115200>;
+};

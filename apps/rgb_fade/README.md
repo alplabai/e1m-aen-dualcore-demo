@@ -75,15 +75,84 @@ each one, which is what lets a `pwms` phandle point at them.
 
 ## Status
 
-**Built, not yet run on hardware.** The build is verified end to end and the
-generated devicetree resolves as intended (`utimer10`/`utimer11` enabled,
-pinctrl applied, the three consumer channels bound to the right controller and
-channel at a 1 kHz period). It has **not** been executed on silicon, so the
-LED has not been observed fading.
+**Bench-proven on silicon.** Run on E1M-AEN801 (`AE822FA0E5597LS0`, M55-HE)
+via a J-Link ITCM RAM-run (Flow C) — no MRAM was written and the resident
+slot0 image was left untouched. Probe `DPIDR 0x4C013477`.
 
-The board target above is Alif's own E8 DevKit -- the same silicon as
-E1M-AEN801. Building for this repo's own `e1m_aen` board against the Alif fork
-additionally needs those board files to accept the fork's SoC name
-(`ae822fa0e5597xx0`, where this repo's board files say `ae822fa0e5597ls0` /
-`ae402fa0e5597le0`). The overlay is provided under both board filenames; the
-DevKit one is the one that has been built.
+Console (UART5, 115200), from reset:
+
+```
+*** Booting Zephyr OS build f002a4d8499c ***
+I: === Alp Lab E1M-AEN RGB fade (Alif UTIMER PWM) ===
+I: period 1000000 ns (1000 Hz), 50 steps, 20 ms per step
+I: red   -> pwm10 channel 0
+I: green -> pwm11 channel 1
+I: blue  -> pwm11 channel 0
+I: fading -- red/green/blue phase-shifted by a third of a cycle
+I: cycle 0
+I: cycle 1
+```
+
+Two soaks: **83 cycles over 164.9 s** and **54 cycles over 106.6 s**, both
+gap-free, cycle interval a steady **~2.013 s** against the 2.000 s the source
+asks for. No `not ready`, no `pwm_set_dt(...) failed`, and `CFSR = 0x00000000`
+at every halt.
+
+Each colour bound to exactly the controller and channel the pad map predicts.
+
+### Register evidence
+
+There is no scope or camera on that bench, so the LED itself was not observed.
+What was measured is that the driver programs the hardware. Sampling both
+UTIMER windows three times ~1 s apart while the app ran:
+
+| Address | Register | sample 1 → 2 → 3 |
+|---|---|---|
+| `0x4800B0A0` | `UTIMER_CNTR` (utimer10) | `000617DE` → `000577F8` → `00006E80` |
+| `0x4800B0D0` | `UTIMER_COMPARE_A` (red) | `0002EE00` → `00032C80` → `0002EE00` |
+| `0x4800C0A0` | `UTIMER_CNTR` (utimer11) | `0005CD40` → `0005FEDB` → `00011C7F` |
+| `0x4800C0D0` | `UTIMER_COMPARE_A` (blue) | `00013880` → `0004E200` → `00013880` |
+| `0x4800C0E0` | `UTIMER_COMPARE_B` (green) | `00053FC0` → `0000DAC0` → `00053FC0` |
+
+Steady across all three: `UTIMER_CNTR_PTR = 0x00061A80` (400000 counts) on
+both timers, `UTIMER_CNTR_CTRL = 0x00000003`, `UTIMER_COMPARE_CTRL_A =
+0x00000909` on both, `UTIMER_COMPARE_CTRL_B = 0x00000909` on utimer11 **only**
+(`0x00000000` on utimer10) — matching red using one channel while blue and
+green share utimer11. `UTIMER_GLB_CNTR_RUNNING = 0x00000C00` sets bits 10 and
+11, i.e. both timers running.
+
+A **baseline dump taken while halted, before `go`, read all-zero across both
+windows**, so "changed" is measured against a genuine zero start.
+
+Every observed compare value is an exact multiple of `400000 / 50 = 8000` —
+`0x0002EE00` = 192000 (step 24), `0x00032C80` = 208000 (step 26), `0x00013880`
+= 80000 (step 10), `0x0004E200` = 320000 (step 40), `0x00053FC0` = 344000
+(step 43), `0x0000DAC0` = 56000 (step 7). Each lands exactly on one of the 50
+sweep steps, at three different phases; samples 1 and 3 (one full cycle apart)
+return to identical values while sample 2 (half a cycle) sits opposite.
+
+### What is still not proven, and observations not chased
+
+- **The pads were not measured.** Whether `P2_4`, `P12_6` and `P12_7`
+  physically toggle needs a scope or a visible LED; neither exists on that
+  bench. The evidence above is register-level.
+- The console prints two `W: Clock enable not supported` warnings before the
+  banner. This is consistent with the UTIMER clock id being a no-op — see
+  `../../docs/PWM-RGB-PORT.md` section 3.3, where `ALIF_UTIMER_CLK` expands to
+  an `en_mask = 0` entry and the real per-timer enable is the separate HAL
+  call — but it was recorded, not root-caused.
+- After the timers are configured, 41 words per timer window bus-fault on
+  read (`+0x04C…+0x07C`, `+0x098`, `+0x09C`, `+0x0BC`, `+0x0CC`, `+0x0DC`,
+  `+0x0EC`), though the same offsets read as zero before. Not diagnosed.
+- The UTIMER retains its programming and keeps running across a J-Link
+  `loadbin` reset. Not diagnosed.
+- Reads were refused while the core was running (`Memory map 'after startup
+  completion point' is active`), so each sample is `halt` → read → `go`.
+  Halting stops the CPU, not the timer hardware.
+
+The board target is Alif's E8 DevKit — the same silicon as E1M-AEN801, which
+is what makes this run valid. Building for this repo's own `e1m_aen` board
+against the Alif fork additionally needs those board files to accept the
+fork's SoC name (`ae822fa0e5597xx0`, where this repo says `ae822fa0e5597ls0` /
+`ae402fa0e5597le0`). The overlay ships under both board filenames; the DevKit
+one is what has been built and run.
