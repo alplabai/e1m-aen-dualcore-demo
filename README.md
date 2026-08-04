@@ -29,20 +29,17 @@ with no debugger attached. That is one bench unit, not a general guarantee.
 
 ## 2. Get the sources
 
-> **This repository is private.** The commands below only work if your
-> GitHub account has been granted access to it and your `git` is
-> authenticated (SSH key or credential helper). If you were sent an archive
-> of this tree instead, skip the `west init -m` line: unpack it, then run
-> `west init -l <path-to-this-directory>` followed by `west update` from the
-> directory above it.
-
 ```sh
 west init -m https://github.com/alplabai/e1m-aen-dualcore-demo
 west update
 ```
 
+If you were sent an archive of this tree rather than cloning it, skip the
+`west init -m` line: unpack the archive, then from the directory *above* it
+run `west init -l <this-directory>` followed by `west update`.
+
 Either route gives you a workspace with upstream Zephyr v4.4.0 and this repo
-alongside it, with this repo's directory as the `<repo>` path used below.
+alongside it. This repo's directory is the `<repo>` path used below.
 
 ## 3. Build
 
