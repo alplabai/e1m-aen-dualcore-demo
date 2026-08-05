@@ -75,9 +75,17 @@ each one, which is what lets a `pwms` phandle point at them.
 
 ## Status
 
-**Bench-proven on silicon.** Run on E1M-AEN801 (`AE822FA0E5597LS0`, M55-HE)
-via a J-Link ITCM RAM-run (Flow C) — no MRAM was written and the resident
-slot0 image was left untouched. Probe `DPIDR 0x4C013477`.
+**Bench-proven on silicon, and the LED was seen working.** Run on E1M-AEN801
+(`AE822FA0E5597LS0`, M55-HE) via a J-Link ITCM RAM-run (Flow C) — no MRAM was
+written and the resident slot0 image was left untouched. Probe
+`DPIDR 0x4C013477`.
+
+The RGB LED itself was **confirmed visually by the maintainer at the board on
+2026-08-05**: it fades as intended. That is a human observation rather than an
+instrumented one — no scope trace was taken and the pad waveforms were not
+measured — but for an LED it is the observation that matters, and it closes
+the one gap the register evidence below could not: that the programmed
+compare values actually reach the pins.
 
 Console (UART5, 115200), from reset:
 
@@ -133,9 +141,10 @@ return to identical values while sample 2 (half a cycle) sits opposite.
 
 ### What is still not proven, and observations not chased
 
-- **The pads were not measured.** Whether `P2_4`, `P12_6` and `P12_7`
-  physically toggle needs a scope or a visible LED; neither exists on that
-  bench. The evidence above is register-level.
+- **No scope trace of the pads.** `P2_4`, `P12_6` and `P12_7` were not
+  measured with an instrument, so the exact duty and edge timing at the pins
+  are uncharacterised. The LED fading confirms the signals reach the pads and
+  vary as intended; it does not verify the waveform.
 - The console prints two `W: Clock enable not supported` warnings before the
   banner. This is consistent with the UTIMER clock id being a no-op — see
   `../../docs/PWM-RGB-PORT.md` section 3.3, where `ALIF_UTIMER_CLK` expands to

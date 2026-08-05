@@ -1,6 +1,13 @@
 # Porting a PWM RGB LED fade example to this repo
 
-Status: **specification only — no code written yet, nothing bench-verified.**
+Status: **implemented and bench-proven.** The example now lives at
+`apps/rgb_fade/` — built against Alif's Zephyr fork, run on E1M-AEN801, and
+the RGB LED confirmed fading at the board on 2026-08-05. See that app's
+README for the run evidence.
+
+This document is kept as the porting record: it explains why the example
+builds against Alif's fork rather than the upstream Zephyr the rest of this
+repo pins, and the traps found while establishing that.
 
 This file records everything established for adding a PWM RGB LED fade
 example to this repo as a bare-Zephyr application, so the next person does
