@@ -1,0 +1,115 @@
+/*
+ * SPDX-FileCopyrightText: Copyright 2026 Alp Lab AB
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * RGB LED wiring for the E1M-AEN carrier, driven by the Alif UTIMER in PWM
+ * mode.
+ *
+ * PAD MAP -- the three channels are NON-CONTIGUOUS in the E1M PWM numbering
+ * and are split across TWO UTIMER instances. Do not assume PWM0/1/2:
+ *
+ *   colour | E1M PWM | E1M pad | silicon peripheral | silicon pad
+ *   -------+---------+---------+--------------------+------------
+ *   green  | PWM0    | A6      | UT11_T1_C          | P12_7
+ *   blue   | PWM1    | B6      | UT11_T0_C          | P12_6
+ *   red    | PWM3    | B5      | UT10_T0_A          | P2_4
+ *
+ * So green and blue are channels 1 and 0 of utimer11, and red is channel 0
+ * of utimer10 -- both instances must be enabled.
+ *
+ * UT<n>_T<0|1>_<A|B|C> reads as: UTIMER instance n, driver A (channel 0) or
+ * driver B (channel 1), and the pad-variant letter.
+ *
+ * These are PWM OUTPUT pads, so no input-enable and no bias is configured
+ * here -- that is only needed for SENSED pads (I2C SDA/SCL, UART RX,
+ * SPI MISO).
+ *
+ * The `pwm-leds` node below is not decoration: the application resolves its
+ * PWM handles from these consumer children rather than from the controller
+ * nodes, because DEVICE_DT_GET on an "alif,pwm" controller emits a phantom
+ * `pwmN_P_pwms_IDX_0` codegen reference and fails to build. See the
+ * top-of-file comment in ../src/main.c.
+ */
+
+/*
+ * NOTE the header name: Alif's Zephyr fork calls this
+ * `ensemble-e4-e6-e8-pinctrl.h`, while upstream Zephyr calls the equivalent
+ * `alif-ensemble-pinctrl.h`. The macro names themselves are identical in
+ * both. This app builds against the fork (see ../CMakeLists.txt), so it uses
+ * the fork's spelling.
+ */
+#include <zephyr/dt-bindings/pinctrl/ensemble-e4-e6-e8-pinctrl.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	rgb_leds: pwm-leds {
+		compatible = "pwm-leds";
+
+		rgb_led_red: led_red {
+			label = "rgb-red";
+			pwms  = <&pwm10 0 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+		};
+
+		rgb_led_blue: led_blue {
+			label = "rgb-blue";
+			pwms  = <&pwm11 0 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+		};
+
+		rgb_led_green: led_green {
+			label = "rgb-green";
+			pwms  = <&pwm11 1 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+		};
+	};
+
+	aliases {
+		rgb-red   = &rgb_led_red;
+		rgb-green = &rgb_led_green;
+		rgb-blue  = &rgb_led_blue;
+	};
+};
+
+&pinctrl {
+	/* red: UT10_T0_A on P2_4 (E1M PWM3, pad B5) */
+	pinctrl_pwm10: pinctrl_pwm10 {
+		group0 {
+			pinmux = <PIN_P2_4__UT10_T0_A>;
+		};
+	};
+
+	/* blue: UT11_T0_C on P12_6 (E1M PWM1, pad B6)
+	 * green: UT11_T1_C on P12_7 (E1M PWM0, pad A6)
+	 * Both belong to utimer11, so they share one pinctrl group. */
+	pinctrl_pwm11: pinctrl_pwm11 {
+		group0 {
+			pinmux = <PIN_P12_6__UT11_T0_C>,
+				 <PIN_P12_7__UT11_T1_C>;
+		};
+	};
+};
+
+/*
+ * The SoC devicetree declares these PWM children by NAME only -- they carry
+ * no labels (`pwm10 { ... }`, not `pwm10: pwm10 { ... }`). A `pwms` phandle
+ * needs a label, so we attach one here while enabling each child. Labels are
+ * resolved after the whole tree is parsed, so the `pwm-leds` node above may
+ * reference them even though it appears earlier in this file.
+ */
+&utimer10 {
+	status = "okay";
+
+	pwm10: pwm10 {
+		status        = "okay";
+		pinctrl-0     = <&pinctrl_pwm10>;
+		pinctrl-names = "default";
+	};
+};
+
+&utimer11 {
+	status = "okay";
+
+	pwm11: pwm11 {
+		status        = "okay";
+		pinctrl-0     = <&pinctrl_pwm11>;
+		pinctrl-names = "default";
+	};
+};
